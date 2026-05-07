@@ -55,6 +55,24 @@ type GraphRef = {
   current?: boolean;
   tracking?: boolean;
 };
+type CommitGraphNode = {
+  entry: GitGraphEntry;
+  lane: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+type CommitGraphEdge = {
+  from: CommitGraphNode;
+  to: CommitGraphNode;
+};
+type CommitGraphLayout = {
+  nodes: CommitGraphNode[];
+  edges: CommitGraphEdge[];
+  width: number;
+  height: number;
+};
 
 type OperationState = {
   title: string;
@@ -499,8 +517,83 @@ function SummaryItem({ label, value, tone }: { label: string; value: string; ton
   );
 }
 
-function GraphWorkspace({ snapshot, text }: { snapshot: GitSnapshot | null; text: ReturnType<typeof uiText> }) {
-  const entries = snapshot?.graph ?? [];
+function GraphWorkspace({
+  projectId,
+  snapshot,
+  text,
+  busy,
+  onRun
+}: {
+  projectId: string;
+  snapshot: GitSnapshot | null;
+  text: ReturnType<typeof uiText>;
+  busy: boolean;
+  onRun: RunGitCommand;
+}) {
+  const entries = useMemo(() => snapshot?.graph ?? [], [snapshot]);
+  const [selectedHash, setSelectedHash] = useState<string | null>(null);
+  const [branchName, setBranchName] = useState("");
+  const [hardConfirm, setHardConfirm] = useState("");
+
+  useEffect(() => {
+    if (!entries.length) {
+      setSelectedHash(null);
+      return;
+    }
+    if (!selectedHash || !entries.some((entry) => entry.hash === selectedHash)) {
+      setSelectedHash(entries[0].hash);
+    }
+  }, [entries, selectedHash]);
+
+  const selectedEntry = entries.find((entry) => entry.hash === selectedHash) ?? entries[0] ?? null;
+  const selectedRefs = useMemo(() => (selectedEntry ? graphRefs(selectedEntry, snapshot) : []), [selectedEntry, snapshot]);
+
+  function chooseEntry(entry: GitGraphEntry) {
+    setSelectedHash(entry.hash);
+    setHardConfirm("");
+  }
+
+  async function createBranchFromCommit() {
+    if (!selectedEntry || !branchName.trim()) {
+      return;
+    }
+    const name = branchName.trim();
+    await onRun(text.createBranchHere, () => window.gitool.createBranch({ projectId, name, startPoint: selectedEntry.hash }));
+    setBranchName("");
+  }
+
+  async function runRefAction(ref: GraphRef) {
+    if (ref.kind === "local" && ref.branchName && !ref.current) {
+      await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, ref.branchName));
+      return;
+    }
+    if (ref.kind === "remote" && ref.remoteBranch && !ref.label.endsWith("/HEAD")) {
+      const existingBranch = snapshot?.branches.some((branch) => branch.name === ref.remoteBranch);
+      if (existingBranch) {
+        await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, ref.remoteBranch));
+        return;
+      }
+      await onRun(text.trackRemoteBranch, () =>
+        window.gitool.createBranch({ projectId, name: ref.remoteBranch ?? ref.label.replace(/^[^/]+\//, ""), startPoint: ref.label })
+      );
+    }
+  }
+
+  async function resetToCommit(mode: ResetMode) {
+    if (!selectedEntry) {
+      return;
+    }
+    const label = resetModeLabel(text, mode);
+    if (mode === "hard" && hardConfirm.trim() !== selectedEntry.shortHash) {
+      return;
+    }
+    if (!confirm(text.resetConfirm(label, selectedEntry.shortHash))) {
+      return;
+    }
+    await onRun(text.resetToCommit, () => window.gitool.resetToCommit({ projectId, hash: selectedEntry.hash, mode }));
+    setHardConfirm("");
+  }
+
   return (
     <section className="graph-workspace">
       <div className="graph-sidebar">
@@ -525,31 +618,229 @@ function GraphWorkspace({ snapshot, text }: { snapshot: GitSnapshot | null; text
           <strong>{text.graphView}</strong>
           <span>{text.gitGraphHint}</span>
         </div>
-        <div className="git-graph-list">
-          {entries.map((entry, index) => (
-            <div key={entry.hash || `${entry.message}-${index}`} className={`git-graph-row ${entry.isHead ? "head" : ""}`}>
-              <code className="git-graph-lines">{entry.graph || "*"}</code>
-              <code className="git-graph-sha">{entry.shortHash}</code>
-              <div className="git-graph-message">
-                <strong>{entry.message}</strong>
-                <div className="graph-badges">
-                  {entry.isHead && <span>{text.gitTreeHead}</span>}
-                  {entry.isUpstream && <span>{snapshot?.upstream ?? text.gitTreeRemote}</span>}
-                  {!entry.isUpstream && entry.isRemote && <span>{text.gitTreeRemote}</span>}
-                  {entry.refs &&
-                    entry.refs
-                      .split(", ")
-                      .filter((ref) => ref !== "HEAD" && ref !== snapshot?.upstream && ref !== `HEAD -> ${snapshot?.branch}`)
-                      .slice(0, 3)
-                      .map((ref) => <span key={ref}>{ref}</span>)}
-                </div>
+        <CommitGraphMap
+          entries={entries}
+          snapshot={snapshot}
+          selectedHash={selectedEntry?.hash ?? null}
+          busy={busy}
+          text={text}
+          onSelect={chooseEntry}
+          onRefAction={runRefAction}
+        />
+      </div>
+
+      <aside className="graph-inspector">
+        <p className="eyebrow">{text.selectedCommit}</p>
+        {selectedEntry ? (
+          <>
+            <div className="selected-commit">
+              <code>{selectedEntry.shortHash}</code>
+              <strong>{selectedEntry.message}</strong>
+              <span>{selectedEntry.hash}</span>
+              <div className="graph-badges inspector-badges">
+                {selectedRefs.map((ref) => (
+                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={runRefAction} />
+                ))}
               </div>
             </div>
-          ))}
-          {!entries.length && <div className="empty-inline">{text.gitTreeEmpty}</div>}
-        </div>
-      </div>
+
+            <div className="graph-action-block">
+              <h4>{text.newBranchFromCommit}</h4>
+              <label>
+                {text.newBranchName}
+                <input
+                  value={branchName}
+                  onChange={(event) => setBranchName(event.target.value)}
+                  placeholder="feature/branch-name"
+                />
+              </label>
+              <button type="button" disabled={busy || !branchName.trim()} onClick={createBranchFromCommit}>
+                <GitBranch size={16} />
+                {text.createBranchHere}
+              </button>
+            </div>
+
+            <div className="graph-action-block danger-block">
+              <h4>{text.resetActions}</h4>
+              <p className="reset-explain">{text.resetExplain}</p>
+              <button type="button" disabled={busy} onClick={() => resetToCommit("soft")}>
+                <RotateCcw size={16} />
+                <span><strong>{text.resetSoft}</strong><small>{text.resetSoftHelp}</small></span>
+              </button>
+              <button type="button" disabled={busy} onClick={() => resetToCommit("mixed")}>
+                <RotateCcw size={16} />
+                <span><strong>{text.resetMixed}</strong><small>{text.resetMixedHelp}</small></span>
+              </button>
+              <label>
+                {text.resetHardType}
+                <input
+                  value={hardConfirm}
+                  onChange={(event) => setHardConfirm(event.target.value)}
+                  placeholder={text.resetHardPlaceholder(selectedEntry.shortHash)}
+                />
+              </label>
+              <button
+                type="button"
+                className="hard-reset-button"
+                disabled={busy || hardConfirm.trim() !== selectedEntry.shortHash}
+                onClick={() => resetToCommit("hard")}
+              >
+                <RotateCcw size={16} />
+                <span><strong>{text.resetHard}</strong><small>{text.resetHardHelp}</small></span>
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="muted">{text.noCommitSelected}</p>
+        )}
+      </aside>
     </section>
+  );
+}
+
+function CommitGraphMap({
+  entries,
+  snapshot,
+  selectedHash,
+  busy,
+  text,
+  onSelect,
+  onRefAction
+}: {
+  entries: GitGraphEntry[];
+  snapshot: GitSnapshot | null;
+  selectedHash: string | null;
+  busy: boolean;
+  text: ReturnType<typeof uiText>;
+  onSelect: (entry: GitGraphEntry) => void;
+  onRefAction: (ref: GraphRef) => Promise<void>;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const layout = useMemo(() => layoutCommitGraph(entries), [entries]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const width = layout.width;
+    const height = layout.height;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.lineCap = "round";
+    context.lineJoin = "round";
+
+    context.strokeStyle = "#dfd8ca";
+    context.lineWidth = 1;
+    layout.nodes.forEach((node) => {
+      context.globalAlpha = 0.38;
+      context.beginPath();
+      context.moveTo(node.x + 18, 18);
+      context.lineTo(node.x + 18, height - 22);
+      context.stroke();
+    });
+
+    layout.edges.forEach((edge) => {
+      drawCommitEdge(context, edge, selectedHash);
+    });
+  }, [layout, selectedHash]);
+
+  if (!entries.length) {
+    return <div className="git-graph-empty">{text.gitTreeEmpty}</div>;
+  }
+
+  return (
+    <div className="commit-map-scroll">
+      <div className="commit-map-stage" style={{ width: layout.width, height: layout.height }}>
+        <canvas ref={canvasRef} className="commit-map-canvas" aria-hidden="true" />
+        {layout.nodes.map((node) => {
+          const active = selectedHash === node.entry.hash;
+          const refs = graphRefs(node.entry, snapshot);
+          return (
+            <div
+              key={node.entry.hash}
+              className={`commit-node-card ${node.entry.isHead ? "head" : ""} ${active ? "selected" : ""}`}
+              style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(node.entry)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelect(node.entry);
+                }
+              }}
+            >
+              <span className="commit-node-dot" style={{ background: laneColor(node.lane) }} />
+              <code>{node.entry.shortHash}</code>
+              <strong>{node.entry.message}</strong>
+              <div className="graph-badges node-badges">
+                {refs.slice(0, 4).map((ref) => (
+                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={onRefAction} />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function GraphRefBadge({
+  refInfo,
+  text,
+  busy,
+  onAction
+}: {
+  refInfo: GraphRef;
+  text: ReturnType<typeof uiText>;
+  busy: boolean;
+  onAction: (ref: GraphRef) => Promise<void>;
+}) {
+  const actionable = (refInfo.kind === "local" && !refInfo.current) || (refInfo.kind === "remote" && !refInfo.label.endsWith("/HEAD"));
+  const title =
+    refInfo.kind === "local"
+      ? refInfo.current ? text.currentBranch : text.switchToBranch(refInfo.label)
+      : refInfo.kind === "remote"
+        ? text.trackRemoteBranchLabel(refInfo.label)
+        : refInfo.kind === "tag"
+          ? text.refTag
+          : text.gitTreeHead;
+
+  if (!actionable) {
+    return (
+      <span className={`graph-ref ${refInfo.kind} ${refInfo.current || refInfo.tracking ? "active" : ""}`} title={title}>
+        {refInfo.label}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className={`graph-ref ${refInfo.kind} ${refInfo.current || refInfo.tracking ? "active" : ""}`}
+      title={title}
+      disabled={busy}
+      onClick={(event) => {
+        event.stopPropagation();
+        void onAction(refInfo);
+      }}
+    >
+      {refInfo.label}
+    </button>
   );
 }
 
@@ -1284,6 +1575,163 @@ function githubStatusText(text: ReturnType<typeof uiText>, status: GithubLoginSt
     return status.message ? `${text.githubInvalid}: ${status.message}` : text.githubInvalid;
   }
   return text.githubMissing;
+}
+
+function layoutCommitGraph(entries: GitGraphEntry[]): CommitGraphLayout {
+  const nodeWidth = 310;
+  const nodeHeight = 72;
+  const rowHeight = 92;
+  const laneSpacing = 88;
+  const paddingX = 24;
+  const paddingY = 24;
+  const nodes = entries.map((entry, index) => {
+    const lane = graphLane(entry);
+    return {
+      entry,
+      lane,
+      x: paddingX + lane * laneSpacing,
+      y: paddingY + index * rowHeight,
+      width: nodeWidth,
+      height: nodeHeight
+    };
+  });
+  const nodeByHash = new Map(nodes.map((node) => [node.entry.hash, node]));
+  const edges = nodes.flatMap((node) =>
+    node.entry.parents
+      .map((parentHash) => nodeByHash.get(parentHash))
+      .filter((parent): parent is CommitGraphNode => Boolean(parent))
+      .map((parent) => ({ from: node, to: parent }))
+  );
+  const maxLane = nodes.reduce((value, node) => Math.max(value, node.lane), 0);
+  return {
+    nodes,
+    edges,
+    width: paddingX * 2 + maxLane * laneSpacing + nodeWidth,
+    height: Math.max(260, paddingY * 2 + Math.max(0, entries.length - 1) * rowHeight + nodeHeight)
+  };
+}
+
+function drawCommitEdge(context: CanvasRenderingContext2D, edge: CommitGraphEdge, selectedHash: string | null): void {
+  const fromX = edge.from.x + 18;
+  const fromY = edge.from.y + edge.from.height;
+  const toX = edge.to.x + 18;
+  const toY = edge.to.y;
+  const highlight = selectedHash === edge.from.entry.hash || selectedHash === edge.to.entry.hash;
+  const color = highlight ? "#8a3a22" : laneColor(edge.from.lane);
+  const midY = fromY + Math.max(24, (toY - fromY) / 2);
+
+  context.globalAlpha = highlight ? 0.95 : 0.58;
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.lineWidth = highlight ? 2.8 : 2.2;
+  context.beginPath();
+  context.moveTo(fromX, fromY);
+  if (Math.abs(fromX - toX) < 3) {
+    context.lineTo(toX, toY);
+  } else {
+    context.bezierCurveTo(fromX, midY, toX, midY, toX, toY);
+  }
+  context.stroke();
+
+  context.beginPath();
+  context.moveTo(toX, toY);
+  context.lineTo(toX - 4, toY - 8);
+  context.lineTo(toX + 4, toY - 8);
+  context.closePath();
+  context.fill();
+  context.globalAlpha = 1;
+}
+
+function graphRefs(entry: GitGraphEntry, snapshot: GitSnapshot | null): GraphRef[] {
+  const refs = new Map<string, GraphRef>();
+  if (entry.isHead) {
+    refs.set("HEAD", { label: "HEAD", kind: "head", current: true });
+  }
+
+  for (const rawRef of entry.refs?.split(", ") ?? []) {
+    const raw = rawRef.trim();
+    if (!raw || raw === "HEAD") {
+      continue;
+    }
+    if (raw.startsWith("HEAD -> ")) {
+      const branchName = raw.replace("HEAD -> ", "");
+      refs.set(branchName, {
+        label: branchName,
+        kind: "local",
+        branchName,
+        current: snapshot?.branch === branchName
+      });
+      continue;
+    }
+    if (raw.startsWith("tag: ")) {
+      const label = raw.replace("tag: ", "");
+      refs.set(`tag:${label}`, { label, kind: "tag" });
+      continue;
+    }
+
+    const remote = remoteRef(raw, snapshot);
+    if (remote) {
+      refs.set(raw, {
+        label: raw,
+        kind: "remote",
+        remoteBranch: remote.branch,
+        tracking: snapshot?.upstream === raw
+      });
+      continue;
+    }
+
+    refs.set(raw, {
+      label: raw,
+      kind: "local",
+      branchName: raw,
+      current: snapshot?.branch === raw
+    });
+  }
+
+  if (entry.isUpstream && snapshot?.upstream && !refs.has(snapshot.upstream)) {
+    refs.set(snapshot.upstream, {
+      label: snapshot.upstream,
+      kind: "remote",
+      remoteBranch: remoteRef(snapshot.upstream, snapshot)?.branch,
+      tracking: true
+    });
+  }
+
+  return [...refs.values()];
+}
+
+function remoteRef(ref: string, snapshot: GitSnapshot | null): { remote: string; branch: string } | null {
+  const configuredRemotes = snapshot?.remotes.map((remote) => remote.name) ?? [];
+  const remoteNames = (configuredRemotes.length ? configuredRemotes : ["origin", "upstream"]).sort((a, b) => b.length - a.length);
+  const remote = remoteNames.find((name) => ref.startsWith(`${name}/`));
+  if (!remote) {
+    return null;
+  }
+  return { remote, branch: ref.slice(remote.length + 1) };
+}
+
+function normalizeGraph(graph: string): string {
+  const trimmed = graph.replace(/\s+$/g, "");
+  return trimmed.includes("*") ? trimmed : "*";
+}
+
+function graphLane(entry: GitGraphEntry): number {
+  return Math.max(0, normalizeGraph(entry.graph).indexOf("*"));
+}
+
+function laneColor(index: number): string {
+  const colors = ["#8a6a17", "#245a43", "#2f5f9a", "#8a3a22", "#6b4f95", "#6c6f2e", "#9a5d35", "#4d6c78"];
+  return colors[index % colors.length];
+}
+
+function resetModeLabel(text: ReturnType<typeof uiText>, mode: ResetMode): string {
+  if (mode === "soft") {
+    return text.resetSoft;
+  }
+  if (mode === "mixed") {
+    return text.resetMixed;
+  }
+  return text.resetHard;
 }
 
 function shortSha(value: string): string {

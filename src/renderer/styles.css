@@ -630,7 +630,8 @@ button:disabled {
   gap: 4px;
 }
 
-.graph-badges span {
+.graph-badges span,
+.graph-badges .graph-ref {
   max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -641,6 +642,32 @@ button:disabled {
   color: #5f5a50;
   font-size: 11px;
   padding: 2px 6px;
+}
+
+.graph-badges .graph-ref {
+  height: 22px;
+}
+
+.graph-badges button.graph-ref:not(:disabled):hover {
+  border-color: #a88935;
+  background: #fff4d8;
+  color: #3f3312;
+}
+
+.graph-badges .graph-ref.active {
+  border-color: #20201d;
+  background: #20201d;
+  color: #f7f3ea;
+}
+
+.graph-badges .graph-ref.remote {
+  border-color: #b9d3c7;
+  color: #245a43;
+}
+
+.graph-badges .graph-ref.tag {
+  border-color: #d9c4aa;
+  color: #805126;
 }
 
 .empty-guide {
@@ -1234,7 +1261,7 @@ button:disabled {
 
 .graph-workspace {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 248px minmax(0, 1fr) 330px;
   min-height: 0;
   background: #f9f7f0;
 }
@@ -1250,7 +1277,7 @@ button:disabled {
 
 .graph-sidebar h3 {
   margin: 0;
-  font-size: 28px;
+  font-size: 24px;
   letter-spacing: 0;
 }
 
@@ -1309,13 +1336,102 @@ button:disabled {
   padding: 12px 18px 24px;
 }
 
+.commit-map-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 18px 24px;
+}
+
+.commit-map-stage {
+  position: relative;
+  min-width: 100%;
+}
+
+.commit-map-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.commit-node-card {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 18px 64px minmax(0, 1fr);
+  grid-template-rows: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  border: 1px solid #d9d0bc;
+  border-radius: 7px;
+  background: #fffdfa;
+  box-shadow: 0 1px 0 rgba(32, 32, 29, 0.04);
+  cursor: pointer;
+  outline: 0;
+  padding: 8px 10px;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.commit-node-card:hover {
+  border-color: #b8973a;
+  background: #fff8e8;
+}
+
+.commit-node-card.selected {
+  border-color: #c69026;
+  background: #fff4d8;
+  box-shadow: 0 0 0 2px rgba(198, 144, 38, 0.18);
+}
+
+.commit-node-card.head {
+  border-color: #8ab8a0;
+}
+
+.commit-node-dot {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #fffdfa;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(32, 32, 29, 0.14);
+}
+
+.commit-node-card code {
+  color: #80631e;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.commit-node-card strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.node-badges {
+  grid-column: 2 / 4;
+  min-width: 0;
+  overflow: hidden;
+  max-height: 24px;
+}
+
+.git-graph-empty {
+  color: #817b70;
+  padding: 18px;
+}
+
 .git-graph-row {
   display: grid;
-  grid-template-columns: 110px 72px minmax(0, 1fr);
-  align-items: start;
-  min-height: 38px;
+  grid-template-columns: 156px 68px minmax(0, 1fr);
+  align-items: center;
+  min-height: 44px;
   border-radius: 7px;
-  padding: 7px 8px;
+  outline: 0;
+  padding: 0 8px;
+  cursor: pointer;
+  transition: background 120ms ease, box-shadow 120ms ease;
 }
 
 .git-graph-row:hover,
@@ -1323,15 +1439,20 @@ button:disabled {
   background: #fffaf1;
 }
 
-.git-graph-lines,
+.git-graph-row.selected {
+  background: #fff4d8;
+  box-shadow: inset 0 0 0 1px #d4b865;
+}
+
+.commit-graph-canvas {
+  width: 148px;
+  height: 46px;
+  display: block;
+}
+
 .git-graph-sha {
   font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   font-size: 13px;
-}
-
-.git-graph-lines {
-  color: #8a6a17;
-  white-space: pre;
 }
 
 .git-graph-sha {
@@ -1350,6 +1471,124 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+}
+
+.graph-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  overflow: auto;
+  border-left: 1px solid #e1ddd4;
+  background: #f3f0e7;
+  padding: 18px;
+}
+
+.selected-commit {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border-bottom: 1px solid #ded8cc;
+  padding-bottom: 14px;
+}
+
+.selected-commit code {
+  width: max-content;
+  border-radius: 6px;
+  background: #20201d;
+  color: #f7f3ea;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 7px;
+}
+
+.selected-commit strong,
+.selected-commit span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.selected-commit span {
+  color: #817b70;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.inspector-badges {
+  margin-top: 2px;
+}
+
+.graph-action-block {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.graph-action-block h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.reset-explain {
+  margin: 0;
+  color: #6e685f;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.graph-action-block label {
+  display: grid;
+  gap: 7px;
+  color: #5f5a50;
+  font-size: 12px;
+}
+
+.graph-action-block input {
+  height: 36px;
+  min-width: 0;
+  border: 1px solid #d8d2c5;
+  border-radius: 7px;
+  background: #fffdfa;
+  padding: 0 10px;
+}
+
+.graph-action-block > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  min-height: 38px;
+  border: 1px solid #d8d2c5;
+  border-radius: 7px;
+  background: #fffdfa;
+  color: #20201d;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.graph-action-block > button:not(:disabled):hover {
+  border-color: #a88935;
+  background: #fff4d8;
+}
+
+.graph-action-block > button span {
+  display: grid;
+  gap: 2px;
+}
+
+.graph-action-block > button small {
+  color: #817b70;
+  font-size: 11px;
+}
+
+.danger-block {
+  border-top: 1px solid #ded8cc;
+  padding-top: 14px;
+}
+
+.danger-block .hard-reset-button {
+  border-color: #d7aaa2;
+  color: #8e332d;
 }
 
 .changes-workspace {

@@ -45,7 +45,7 @@ export class GitService {
       this.git(project.path, ["branch", "--format=%(HEAD)|%(refname:short)|%(upstream:short)"], true),
       this.git(project.path, ["remote", "-v"], true),
       this.git(project.path, ["log", "--oneline", "--decorate", "-30"], false),
-      this.git(project.path, ["log", "--all", "--graph", "--date-order", "--decorate=short", "--pretty=format:%x1f%H%x1f%h%x1f%D%x1f%s", "-80"], false),
+      this.git(project.path, ["log", "--all", "--graph", "--date-order", "--decorate=short", "--pretty=format:%x1f%H%x1f%h%x1f%P%x1f%D%x1f%s", "-80"], false),
       this.git(project.path, ["stash", "list"], false),
       this.git(project.path, ["tag", "--list"], false),
       this.git(project.path, ["rev-parse", "HEAD"], false)
@@ -387,11 +387,12 @@ function parseGraphEntries(stdout: string, headSha: string, upstreamSha?: string
       const delimiter = line.indexOf("\x1f");
       const graph = line.slice(0, delimiter);
       const payload = line.slice(delimiter + 1);
-      const [hash = "", shortHash = "", refs = "", message = payload] = payload.split("\x1f");
+      const [hash = "", shortHash = "", parents = "", refs = "", message = payload] = payload.split("\x1f");
       return {
         graph,
         hash,
         shortHash,
+        parents: parents.split(" ").filter(Boolean),
         refs: refs || undefined,
         message,
         isHead: hash === headSha,

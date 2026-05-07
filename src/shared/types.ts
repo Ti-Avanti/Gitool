@@ -45,6 +45,7 @@ export type GitGraphEntry = {
   graph: string;
   hash: string;
   shortHash: string;
+  parents: string[];
   message: string;
   refs?: string;
   isHead: boolean;
