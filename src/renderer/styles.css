@@ -679,9 +679,13 @@ button:disabled {
   gap: 4px;
 }
 
+.compact-node-refs {
+  align-items: center;
+}
+
 .graph-badges span,
 .graph-badges .graph-ref {
-  max-width: 110px;
+  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -707,7 +711,7 @@ button:disabled {
 
 .graph-ref-group > span.graph-ref {
   flex: 1 1 auto;
-  max-width: 96px;
+  max-width: 132px;
   min-width: 0;
 }
 
@@ -723,15 +727,15 @@ button:disabled {
 }
 
 .graph-ref-group.compact {
-  max-width: 168px;
+  max-width: 220px;
 }
 
 .graph-ref-group.compact > span.graph-ref {
-  max-width: 90px;
+  max-width: 128px;
 }
 
 .graph-ref-group.detail {
-  max-width: 238px;
+  max-width: 290px;
 }
 
 .graph-badges .graph-ref.merge-action {
@@ -757,14 +761,74 @@ button:disabled {
   color: #f7f3ea;
 }
 
+.graph-badges .graph-ref.head {
+  border-color: #20201d;
+}
+
+.graph-badges .graph-ref.overflow-ref {
+  border-color: #d6c38c;
+  background: #fff8e8;
+  color: #6f5315;
+  font-weight: 850;
+}
+
 .graph-badges .graph-ref.remote {
   border-color: #b9d3c7;
   color: #245a43;
+  background: #f5fbf8;
 }
 
 .graph-badges .graph-ref.tag {
   border-color: #d9c4aa;
   color: #805126;
+}
+
+.inspector-ref-modules {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.ref-module {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #ded8cc;
+  border-radius: 7px;
+  background: #fffdfa;
+  padding: 10px;
+}
+
+.ref-module.current-module {
+  border-color: #20201d;
+  background: #f9f7f0;
+}
+
+.ref-module-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ref-module-heading span {
+  color: #20201d;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.ref-module-heading small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #817b70;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.inspector-badges.separated {
+  gap: 6px;
 }
 
 .empty-guide {
@@ -1189,6 +1253,12 @@ button:disabled {
   gap: 6px;
 }
 
+.list-heading {
+  color: #817b70;
+  font-size: 12px;
+  font-weight: 850;
+}
+
 .more-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -1239,6 +1309,98 @@ button:disabled {
   color: #743d26;
 }
 
+.merge-panel {
+  gap: 16px;
+}
+
+.merge-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.merge-node {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid #ded8cc;
+  border-radius: 7px;
+  background: #fffdfa;
+  padding: 12px;
+}
+
+.merge-node span {
+  color: #817b70;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.merge-node strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+}
+
+.merge-node.target {
+  border-color: #20201d;
+  background: #f9f7f0;
+}
+
+.merge-arrow {
+  justify-self: center;
+  color: #8a6a17;
+}
+
+.merge-risk-list {
+  display: grid;
+  gap: 7px;
+}
+
+.merge-risk-list div {
+  border: 1px solid #ded8cc;
+  border-radius: 7px;
+  background: #fffdfa;
+  color: #5f5a50;
+  line-height: 1.45;
+  padding: 9px 11px;
+}
+
+.merge-risk-list .warning {
+  border-color: #d7b8a7;
+  background: #fff8f1;
+  color: #743d26;
+}
+
+.branch-current-card {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #20201d;
+  border-radius: 7px;
+  background: #f9f7f0;
+  padding: 12px;
+}
+
+.branch-current-card span,
+.branch-row-name small {
+  color: #817b70;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.branch-current-card strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+}
+
+.branch-current-card small {
+  color: #5f5a50;
+  line-height: 1.35;
+}
+
 .token-status {
   display: grid;
   gap: 4px;
@@ -1282,6 +1444,18 @@ button:disabled {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.mini-row .branch-row-name {
+  display: grid;
+  gap: 2px;
+}
+
+.mini-row .branch-row-name strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mini-row button {

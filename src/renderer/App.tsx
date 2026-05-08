@@ -42,7 +42,7 @@ import type {
 } from "../shared/types";
 import { uiText } from "./i18n";
 
-type Panel = "branch" | "stash" | "tag" | "rebase" | "pr" | "token" | "settings" | "history" | "more" | null;
+type Panel = "branch" | "merge" | "stash" | "tag" | "rebase" | "pr" | "token" | "settings" | "history" | "more" | null;
 type WorkspaceView = "graph" | "changes" | "sync";
 type RunGitCommand = (title: string, action: () => Promise<GitCommandResult>, refresh?: boolean) => Promise<void>;
 type RemoteCheckState = "idle" | "checking" | "error";
@@ -109,6 +109,7 @@ export default function App() {
   const [draggingProject, setDraggingProject] = useState(false);
   const [remoteCheckState, setRemoteCheckState] = useState<RemoteCheckState>("idle");
   const [windowActive, setWindowActive] = useState(() => document.hasFocus() && document.visibilityState === "visible");
+  const [mergeSourceHint, setMergeSourceHint] = useState("");
   const refreshInFlight = useRef(false);
   const remoteCheckInFlight = useRef(false);
   const lastRemoteNoticeKey = useRef("");
@@ -142,6 +143,11 @@ export default function App() {
       ...snapshot.files.map((file) => `${file.index}${file.workingTree}:${file.path}`)
     ].join("\n");
   }, [snapshot]);
+
+  const openMergePanel = useCallback((sourceBranch = "") => {
+    setMergeSourceHint(sourceBranch);
+    setPanel("merge");
+  }, []);
 
   const loadProjects = useCallback(async () => {
     const loaded = await window.gitool.listProjects();
@@ -457,6 +463,23 @@ export default function App() {
     await run(text.push, () => window.gitool.pushProject(selectedProjectId));
   }
 
+  async function switchBranchSafely(branchName: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+    if (snapshot && !snapshot.clean) {
+      setPanel(null);
+      setView("changes");
+      setOperation({
+        title: text.switchBranchBlockedTitle,
+        body: text.switchBranchBlockedBody(snapshot.branch, branchName, snapshot.files.length),
+        tone: "error"
+      });
+      return;
+    }
+    await run(text.switchBranch, () => window.gitool.switchBranch(selectedProjectId, branchName));
+  }
+
   async function changeLanguage(language: LanguagePreference) {
     const next = await window.gitool.saveSettings({ language });
     setSettings(next);
@@ -578,6 +601,7 @@ export default function App() {
               <TabButton active={view === "changes"} icon={<FileText size={16} />} label={text.changesView} onClick={() => setView("changes")} />
               <TabButton active={view === "sync"} icon={<Upload size={16} />} label={text.syncView} onClick={() => setView("sync")} />
               <div className="workspace-tab-actions">
+                <CommandButton label={text.mergeBranch} icon={<Split size={16} />} disabled={!selectedProject || busy} onClick={() => openMergePanel()} />
                 <CommandButton label={text.fetch} icon={<Download size={16} />} disabled={busy} onClick={() => selectedProjectId && run(text.fetch, () => window.gitool.fetchProject(selectedProjectId))} />
                 <CommandButton label={text.pull} icon={<Download size={16} />} disabled={busy} onClick={pull} />
                 <CommandButton label={text.push} icon={<Upload size={16} />} disabled={busy} onClick={push} />
@@ -591,6 +615,8 @@ export default function App() {
                 text={text}
                 busy={busy}
                 onRun={run}
+                onSwitchBranch={switchBranchSafely}
+                onOpenMergeBranch={openMergePanel}
               />
             )}
             {view === "changes" && (
@@ -642,8 +668,10 @@ export default function App() {
           snapshot={snapshot}
           settings={settings}
           projectId={selectedProjectId ?? ""}
+          mergeSourceHint={mergeSourceHint}
           onClose={() => setPanel(null)}
           onRun={run}
+          onSwitchBranch={switchBranchSafely}
           onSettings={setSettings}
           githubStatus={githubStatus}
           onGithubStatusChange={setGithubStatus}
@@ -676,7 +704,7 @@ function RepoSummary({
 }) {
   return (
     <section className="repo-summary">
-      <SummaryItem label={text.branch} value={snapshot?.branch ?? "-"} />
+      <SummaryItem label={text.currentBranch} value={snapshot?.branch ?? "-"} />
       <SummaryItem label={text.upstream} value={snapshot?.upstream ?? text.notSet} />
       <SummaryItem label={text.remoteSync} value={snapshot ? text.syncLabel(snapshot.remoteSync) : text.notSet} tone={snapshot?.remoteSync === "synced" ? "good" : "warn"} />
       <SummaryItem label={text.changedFiles} value={snapshot?.clean ? text.clean : text.changes(snapshot?.files.length ?? 0)} />
@@ -719,13 +747,17 @@ function GraphWorkspace({
   snapshot,
   text,
   busy,
-  onRun
+  onRun,
+  onSwitchBranch,
+  onOpenMergeBranch
 }: {
   projectId: string;
   snapshot: GitSnapshot | null;
   text: ReturnType<typeof uiText>;
   busy: boolean;
   onRun: RunGitCommand;
+  onSwitchBranch: (branchName: string) => Promise<void>;
+  onOpenMergeBranch: (sourceBranch?: string) => void;
 }) {
   const entries = useMemo(() => snapshot?.graph ?? [], [snapshot]);
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
@@ -762,25 +794,29 @@ function GraphWorkspace({
   async function runRefAction(ref: GraphRef, action: GraphRefAction = "primary") {
     const branchName = ref.branchName;
     if (action === "merge" && ref.kind === "local" && branchName && !ref.current) {
-      if (!confirm(text.mergeBranchConfirm(branchName, snapshot?.branch ?? text.currentBranch))) {
-        return;
-      }
-      await onRun(text.mergeBranch, () => window.gitool.mergeBranch(projectId, branchName));
+      onOpenMergeBranch(branchName);
       return;
     }
     if (ref.kind === "local" && branchName && !ref.current) {
-      await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, branchName));
+      await onSwitchBranch(branchName);
       return;
     }
     const remoteBranch = ref.remoteBranch;
     if (ref.kind === "remote" && remoteBranch && !ref.label.endsWith("/HEAD")) {
       const existingBranch = snapshot?.branches.some((branch) => branch.name === remoteBranch);
       if (existingBranch) {
-        await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, remoteBranch));
+        await onSwitchBranch(remoteBranch);
         return;
       }
       await onRun(text.trackRemoteBranch, () =>
-        window.gitool.createBranch({ projectId, name: remoteBranch, startPoint: ref.label })
+        snapshot && !snapshot.clean
+          ? Promise.resolve({
+              ok: false,
+              stdout: "",
+              stderr: text.switchBranchBlockedBody(snapshot.branch, remoteBranch, snapshot.files.length),
+              command: text.trackRemoteBranch
+            })
+          : window.gitool.createBranch({ projectId, name: remoteBranch, startPoint: ref.label })
       );
     }
   }
@@ -843,11 +879,7 @@ function GraphWorkspace({
               <code>{selectedEntry.shortHash}</code>
               <strong>{selectedEntry.message}</strong>
               <span>{selectedEntry.hash}</span>
-              <div className="graph-badges inspector-badges">
-                {selectedRefs.map((ref) => (
-                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={runRefAction} variant="detail" />
-                ))}
-              </div>
+              <InspectorRefModules refs={selectedRefs} text={text} busy={busy} onAction={runRefAction} />
             </div>
 
             <div className="graph-action-block">
@@ -992,14 +1024,81 @@ function CommitGraphMap({
               <span className="commit-node-dot" style={{ background: laneColor(node.lane) }} />
               <code>{node.entry.shortHash}</code>
               <strong>{node.entry.message}</strong>
-              <div className="graph-badges node-badges">
-                {refs.slice(0, 4).map((ref) => (
-                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={onRefAction} variant="compact" />
-                ))}
-              </div>
+              <CompactNodeRefs refs={refs} text={text} />
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function CompactNodeRefs({ refs, text }: { refs: GraphRef[]; text: ReturnType<typeof uiText> }) {
+  const currentRef = refs.find((ref) => ref.kind === "local" && ref.current);
+  const hiddenCount = refs.length - (currentRef ? 1 : 0);
+  if (!currentRef && hiddenCount <= 0) {
+    return null;
+  }
+  return (
+    <div className="graph-badges node-badges compact-node-refs">
+      {currentRef && (
+        <span className="graph-ref local active" title={currentRef.label}>
+          {text.currentBranchDisplay(currentRef.label)}
+        </span>
+      )}
+      {hiddenCount > 0 && <span className="graph-ref overflow-ref">{text.hiddenRefCount(hiddenCount)}</span>}
+    </div>
+  );
+}
+
+function InspectorRefModules({
+  refs,
+  text,
+  busy,
+  onAction
+}: {
+  refs: GraphRef[];
+  text: ReturnType<typeof uiText>;
+  busy: boolean;
+  onAction: (ref: GraphRef, action?: GraphRefAction) => Promise<void>;
+}) {
+  const currentRefs = refs.filter((ref) => ref.kind === "local" && ref.current);
+  const headRefs = refs.filter((ref) => ref.kind === "head");
+  const otherRefs = refs.filter((ref) => !(ref.kind === "local" && ref.current) && ref.kind !== "head");
+
+  return (
+    <div className="inspector-ref-modules">
+      <div className="ref-module current-module">
+        <div className="ref-module-heading">
+          <span>{text.currentBranchModule}</span>
+          <small>{text.branchKindCurrent}</small>
+        </div>
+        <div className="graph-badges inspector-badges separated">
+          {currentRefs.map((ref) => (
+            <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={onAction} variant="detail" />
+          ))}
+          {headRefs.map((ref) => (
+            <span key={`${ref.kind}:${ref.label}`} className="graph-ref head active" title={text.gitTreeHead}>
+              {text.headPointer}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="ref-module other-module">
+        <div className="ref-module-heading">
+          <span>{text.otherRefsModule}</span>
+          <small>{text.branchKindOther} / {text.branchKindRemote}</small>
+        </div>
+        {otherRefs.length ? (
+          <div className="graph-badges inspector-badges separated">
+            {otherRefs.map((ref) => (
+              <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={onAction} variant="detail" />
+            ))}
+          </div>
+        ) : (
+          <p className="muted">{text.noOtherRefs}</p>
+        )}
       </div>
     </div>
   );
@@ -1019,6 +1118,7 @@ function GraphRefBadge({
   variant?: "compact" | "detail";
 }) {
   const actionable = (refInfo.kind === "local" && !refInfo.current) || (refInfo.kind === "remote" && !refInfo.label.endsWith("/HEAD"));
+  const displayLabel = graphRefDisplayLabel(refInfo, text);
   const title =
     refInfo.kind === "local"
       ? refInfo.current ? text.currentBranch : text.switchToBranch(refInfo.label)
@@ -1031,7 +1131,7 @@ function GraphRefBadge({
   if (!actionable) {
     return (
       <span className={`graph-ref ${refInfo.kind} ${refInfo.current || refInfo.tracking ? "active" : ""}`} title={title}>
-        {refInfo.label}
+        {displayLabel}
       </span>
     );
   }
@@ -1040,7 +1140,7 @@ function GraphRefBadge({
     return (
       <div className={`graph-ref-group ${variant}`}>
         <span className="graph-ref local" title={refInfo.label}>
-          {refInfo.label}
+          {displayLabel}
         </span>
         <button
           type="button"
@@ -1087,9 +1187,25 @@ function GraphRefBadge({
         void onAction(refInfo);
       }}
     >
-      {refInfo.label}
+      {displayLabel}
     </button>
   );
+}
+
+function graphRefDisplayLabel(refInfo: GraphRef, text: ReturnType<typeof uiText>): string {
+  if (refInfo.kind === "head") {
+    return "HEAD";
+  }
+  if (refInfo.kind === "local") {
+    return refInfo.current ? text.currentBranchDisplay(refInfo.label) : text.localBranchDisplay(refInfo.label);
+  }
+  if (refInfo.kind === "remote") {
+    return text.remoteBranchDisplay(refInfo.label);
+  }
+  if (refInfo.kind === "tag") {
+    return text.tagDisplay(refInfo.label);
+  }
+  return refInfo.label;
 }
 
 function ChangesWorkspace({
@@ -1392,8 +1508,10 @@ function ActionPanel({
   snapshot,
   settings,
   projectId,
+  mergeSourceHint,
   onClose,
   onRun,
+  onSwitchBranch,
   onSettings,
   githubStatus,
   onGithubStatusChange,
@@ -1404,8 +1522,10 @@ function ActionPanel({
   snapshot: GitSnapshot | null;
   settings: AppSettings | null;
   projectId: string;
+  mergeSourceHint: string;
   onClose: () => void;
   onRun: (title: string, action: () => Promise<GitCommandResult>, refresh?: boolean) => Promise<void>;
+  onSwitchBranch: (branchName: string) => Promise<void>;
   onSettings: (settings: AppSettings) => void;
   githubStatus: GithubLoginStatus | null;
   onGithubStatusChange: (status: GithubLoginStatus) => void;
@@ -1415,6 +1535,7 @@ function ActionPanel({
   const [name, setName] = useState("");
   const [message, setMessage] = useState("");
   const [target, setTarget] = useState(snapshot?.upstream?.replace(/^origin\//, "") || "main");
+  const [mergeSource, setMergeSource] = useState(mergeSourceHint);
   const [head, setHead] = useState(snapshot?.branch ?? "");
   const [body, setBody] = useState("");
   const [pullMode, setPullMode] = useState<PullMode>(settings?.pullMode ?? "ff-only");
@@ -1423,9 +1544,28 @@ function ActionPanel({
   const [clientId, setClientId] = useState(settings?.githubOAuthClientId ?? "");
   const [tokenLoginBusy, setTokenLoginBusy] = useState(false);
   const [tokenMessage, setTokenMessage] = useState("");
+  const mergeableBranches = useMemo(() => snapshot?.branches.filter((branch) => !branch.current) ?? [], [snapshot?.branches]);
+  const currentLocalBranch = useMemo(() => snapshot?.branches.find((branch) => branch.current) ?? null, [snapshot?.branches]);
+  const currentBranch = snapshot?.branch ?? text.currentBranch;
+
+  useEffect(() => {
+    if (panel !== "merge") {
+      return;
+    }
+    setMergeSource((current) => {
+      if (mergeSourceHint && mergeableBranches.some((branch) => branch.name === mergeSourceHint)) {
+        return mergeSourceHint;
+      }
+      if (current && mergeableBranches.some((branch) => branch.name === current)) {
+        return current;
+      }
+      return mergeableBranches[0]?.name ?? "";
+    });
+  }, [mergeSourceHint, mergeableBranches, panel]);
 
   const titleMap: Record<Exclude<Panel, null>, string> = {
     branch: text.branch,
+    merge: text.mergeBranch,
     stash: text.stash,
     tag: text.tag,
     rebase: text.rebase,
@@ -1438,6 +1578,7 @@ function ActionPanel({
 
   const actionCards: Array<{ panel: Exclude<Panel, null>; icon: ReactNode; title: string; description: string; tone?: "danger" }> = [
     { panel: "branch", icon: <GitBranch size={18} />, title: text.branch, description: text.branchHelp },
+    { panel: "merge", icon: <Split size={18} />, title: text.mergeBranch, description: text.mergeHelp },
     { panel: "stash", icon: <Archive size={18} />, title: text.stash, description: text.stashHelp },
     { panel: "tag", icon: <Tags size={18} />, title: text.tag, description: text.tagHelp },
     { panel: "rebase", icon: <Split size={18} />, title: text.rebase, description: text.rebaseHelp, tone: "danger" },
@@ -1491,22 +1632,79 @@ function ActionPanel({
         {panel === "branch" && (
           <div className="modal-content">
             <p className="panel-help">{text.branchIntro}</p>
-            <p className="panel-help">{text.branchMergeHelp(snapshot?.branch ?? text.notSet)}</p>
+            <p className="panel-help">{text.branchLocationHint}</p>
+            <p className="panel-help">{text.branchMergeHelp(currentBranch)}</p>
             <label>{text.branchName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="feature/workflow" /></label>
             <label>{text.startPoint}<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={text.startPointPlaceholder} /></label>
             <button disabled={!name.trim()} onClick={() => onRun(text.createAndSwitch, () => window.gitool.createBranch({ projectId, name, startPoint: target }))}>{text.createAndSwitch}</button>
+            <div className="branch-current-card">
+              <span>{text.branchKindCurrent}</span>
+              <strong>{currentLocalBranch?.name ?? currentBranch}</strong>
+              <small>{text.branchCurrentExplanation}</small>
+            </div>
+            <div className="list-heading">{text.otherLocalBranches}</div>
             <div className="list-block">
-              {snapshot?.branches.map((branch) => (
+              {mergeableBranches.map((branch) => (
                 <div key={branch.name} className="mini-row">
-                  <span>{branch.current ? "● " : ""}{branch.name}</span>
+                  <span className="branch-row-name">
+                    <strong>{branch.name}</strong>
+                    <small>{text.branchKindOther}</small>
+                  </span>
                   <div>
-                    <button disabled={branch.current} onClick={() => onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, branch.name))}>{text.switch}</button>
-                    <button disabled={branch.current} onClick={() => confirm(text.mergeBranchConfirm(branch.name, snapshot?.branch ?? text.currentBranch)) && onRun(text.mergeBranch, () => window.gitool.mergeBranch(projectId, branch.name))}>{text.mergeIntoCurrent}</button>
+                    <button onClick={() => onSwitchBranch(branch.name)}>{text.switch}</button>
+                    <button
+                      onClick={() => {
+                        setMergeSource(branch.name);
+                        onPanelChange("merge");
+                      }}
+                    >
+                      {text.mergeIntoCurrent}
+                    </button>
                     <button disabled={branch.current} onClick={() => confirm(text.deleteBranchConfirm) && onRun(text.deleteBranch, () => window.gitool.deleteBranch(projectId, branch.name))}>{text.delete}</button>
                   </div>
                 </div>
               ))}
+              {!mergeableBranches.length && <p className="muted">{text.noOtherLocalBranches}</p>}
             </div>
+          </div>
+        )}
+
+        {panel === "merge" && (
+          <div className="modal-content merge-panel">
+            <p className="panel-help">{text.mergeWizardIntro}</p>
+            <div className="merge-flow" aria-label={text.mergeBranch}>
+              <div className="merge-node source">
+                <span>{text.mergeSourceBranch}</span>
+                <strong>{mergeSource || text.noMergeSource}</strong>
+              </div>
+              <ChevronRight className="merge-arrow" size={22} />
+              <div className="merge-node target">
+                <span>{text.mergeTargetBranch}</span>
+                <strong>{currentBranch}</strong>
+              </div>
+            </div>
+            <label>
+              {text.mergeSourceBranch}
+              <select value={mergeSource} onChange={(event) => setMergeSource(event.target.value)} disabled={!mergeableBranches.length}>
+                {mergeableBranches.map((branch) => (
+                  <option key={branch.name} value={branch.name}>{branch.name}</option>
+                ))}
+              </select>
+            </label>
+            <div className="merge-risk-list">
+              {mergeSource ? <div>{text.mergeWillMerge(mergeSource, currentBranch)}</div> : <div>{text.noMergeSource}</div>}
+              {!snapshot?.clean && <div className="warning">{text.mergeLocalChangesWarning}</div>}
+              <div>{text.mergeConflictWarning}</div>
+              <div>{text.mergeNoDeleteSource}</div>
+            </div>
+            <button
+              className="commit-button"
+              disabled={!mergeSource}
+              onClick={() => confirm(text.mergeBranchConfirm(mergeSource, currentBranch)) && onRun(text.mergeBranch, () => window.gitool.mergeBranch(projectId, mergeSource))}
+            >
+              <Split size={16} />
+              {text.mergeSelectedBranch}
+            </button>
           </div>
         )}
 
