@@ -46,6 +46,13 @@ type Panel = "branch" | "merge" | "stash" | "tag" | "rebase" | "pr" | "token" | 
 type WorkspaceView = "graph" | "changes" | "sync";
 type RunGitCommand = (title: string, action: () => Promise<GitCommandResult>, refresh?: boolean) => Promise<void>;
 type RemoteCheckState = "idle" | "checking" | "error";
+type RefreshSnapshotOptions = {
+  force?: boolean;
+};
+type RefreshSnapshotInFlight = {
+  projectId: string;
+  promise: Promise<GitSnapshot | null>;
+};
 type GraphRefKind = "head" | "local" | "remote" | "tag";
 type GraphRef = {
   label: string;
@@ -110,7 +117,7 @@ export default function App() {
   const [remoteCheckState, setRemoteCheckState] = useState<RemoteCheckState>("idle");
   const [windowActive, setWindowActive] = useState(() => document.hasFocus() && document.visibilityState === "visible");
   const [mergeSourceHint, setMergeSourceHint] = useState("");
-  const refreshInFlight = useRef(false);
+  const refreshInFlight = useRef<RefreshSnapshotInFlight | null>(null);
   const remoteCheckInFlight = useRef(false);
   const lastRemoteNoticeKey = useRef("");
   const selectedProjectIdRef = useRef<string | null>(null);
@@ -169,24 +176,36 @@ export default function App() {
     setFocusedPath((current) => current && next.files.some((file) => file.path === current) ? current : next.files[0]?.path ?? null);
   }, []);
 
-  const refreshSnapshot = useCallback(async () => {
+  const refreshSnapshot = useCallback(async (options: RefreshSnapshotOptions = {}) => {
     if (!selectedProjectId) {
       setSnapshot(null);
       return null;
     }
-    if (refreshInFlight.current) {
-      return null;
-    }
-    refreshInFlight.current = true;
-    try {
-      const next = await window.gitool.getSnapshot(selectedProjectId);
+    const activeRefresh = refreshInFlight.current;
+    if (activeRefresh) {
+      if (activeRefresh.projectId === selectedProjectId && !options.force) {
+        return activeRefresh.promise;
+      }
+      await activeRefresh.promise.catch(() => null);
       if (selectedProjectIdRef.current !== selectedProjectId) {
+        return null;
+      }
+    }
+    const projectId = selectedProjectId;
+    const refresh = window.gitool.getSnapshot(projectId).then((next) => {
+      if (selectedProjectIdRef.current !== projectId) {
         return null;
       }
       applySnapshot(next);
       return next;
+    });
+    refreshInFlight.current = { projectId, promise: refresh };
+    try {
+      return await refresh;
     } finally {
-      refreshInFlight.current = false;
+      if (refreshInFlight.current?.promise === refresh) {
+        refreshInFlight.current = null;
+      }
     }
   }, [applySnapshot, selectedProjectId]);
 
@@ -415,7 +434,7 @@ export default function App() {
         tone: result.ok ? "success" : "error"
       });
       if (refresh) {
-        await refreshSnapshot();
+        await refreshSnapshot({ force: true });
       }
     } catch (error) {
       setOperation({ title: text.failed(title), body: formatError(error), tone: "error" });
@@ -467,12 +486,13 @@ export default function App() {
     if (!selectedProjectId) {
       return;
     }
-    if (snapshot && !snapshot.clean) {
-      setPanel(null);
+    const latestSnapshot = await refreshSnapshot({ force: true }) ?? snapshot;
+    if (latestSnapshot && !latestSnapshot.clean) {
+      setPanel("stash");
       setView("changes");
       setOperation({
         title: text.switchBranchBlockedTitle,
-        body: text.switchBranchBlockedBody(snapshot.branch, branchName, snapshot.files.length),
+        body: text.switchBranchBlockedBody(latestSnapshot.branch, branchName, latestSnapshot.files.length),
         tone: "error"
       });
       return;
@@ -667,6 +687,7 @@ export default function App() {
           panel={panel}
           snapshot={snapshot}
           settings={settings}
+          operation={operation}
           projectId={selectedProjectId ?? ""}
           mergeSourceHint={mergeSourceHint}
           onClose={() => setPanel(null)}
@@ -1507,6 +1528,7 @@ function ActionPanel({
   panel,
   snapshot,
   settings,
+  operation,
   projectId,
   mergeSourceHint,
   onClose,
@@ -1521,6 +1543,7 @@ function ActionPanel({
   panel: Exclude<Panel, null>;
   snapshot: GitSnapshot | null;
   settings: AppSettings | null;
+  operation: OperationState;
   projectId: string;
   mergeSourceHint: string;
   onClose: () => void;
@@ -1544,9 +1567,14 @@ function ActionPanel({
   const [clientId, setClientId] = useState(settings?.githubOAuthClientId ?? "");
   const [tokenLoginBusy, setTokenLoginBusy] = useState(false);
   const [tokenMessage, setTokenMessage] = useState("");
+  const [showPanelOutput, setShowPanelOutput] = useState(false);
   const mergeableBranches = useMemo(() => snapshot?.branches.filter((branch) => !branch.current) ?? [], [snapshot?.branches]);
   const currentLocalBranch = useMemo(() => snapshot?.branches.find((branch) => branch.current) ?? null, [snapshot?.branches]);
   const currentBranch = snapshot?.branch ?? text.currentBranch;
+
+  useEffect(() => {
+    setShowPanelOutput(false);
+  }, [panel]);
 
   useEffect(() => {
     if (panel !== "merge") {
@@ -1587,6 +1615,11 @@ function ActionPanel({
     { panel: "token", icon: <KeyRound size={18} />, title: text.token, description: text.tokenHelp },
     { panel: "settings", icon: <Settings size={18} />, title: text.settings, description: text.settingsHelp }
   ];
+
+  async function runPanelAction(title: string, action: () => Promise<GitCommandResult>, refresh?: boolean) {
+    setShowPanelOutput(true);
+    await onRun(title, action, refresh);
+  }
 
   async function startTokenWebLogin() {
     setTokenLoginBusy(true);
@@ -1636,7 +1669,7 @@ function ActionPanel({
             <p className="panel-help">{text.branchMergeHelp(currentBranch)}</p>
             <label>{text.branchName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="feature/workflow" /></label>
             <label>{text.startPoint}<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={text.startPointPlaceholder} /></label>
-            <button disabled={!name.trim()} onClick={() => onRun(text.createAndSwitch, () => window.gitool.createBranch({ projectId, name, startPoint: target }))}>{text.createAndSwitch}</button>
+            <button disabled={!name.trim()} onClick={() => runPanelAction(text.createAndSwitch, () => window.gitool.createBranch({ projectId, name, startPoint: target }))}>{text.createAndSwitch}</button>
             <div className="branch-current-card">
               <span>{text.branchKindCurrent}</span>
               <strong>{currentLocalBranch?.name ?? currentBranch}</strong>
@@ -1660,7 +1693,7 @@ function ActionPanel({
                     >
                       {text.mergeIntoCurrent}
                     </button>
-                    <button disabled={branch.current} onClick={() => confirm(text.deleteBranchConfirm) && onRun(text.deleteBranch, () => window.gitool.deleteBranch(projectId, branch.name))}>{text.delete}</button>
+                    <button disabled={branch.current} onClick={() => confirm(text.deleteBranchConfirm) && runPanelAction(text.deleteBranch, () => window.gitool.deleteBranch(projectId, branch.name))}>{text.delete}</button>
                   </div>
                 </div>
               ))}
@@ -1700,7 +1733,7 @@ function ActionPanel({
             <button
               className="commit-button"
               disabled={!mergeSource}
-              onClick={() => confirm(text.mergeBranchConfirm(mergeSource, currentBranch)) && onRun(text.mergeBranch, () => window.gitool.mergeBranch(projectId, mergeSource))}
+              onClick={() => confirm(text.mergeBranchConfirm(mergeSource, currentBranch)) && runPanelAction(text.mergeBranch, () => window.gitool.mergeBranch(projectId, mergeSource))}
             >
               <Split size={16} />
               {text.mergeSelectedBranch}
@@ -1712,7 +1745,7 @@ function ActionPanel({
           <div className="modal-content">
             <p className="panel-help">{text.stashIntro}</p>
             <label>{text.stashMessage}<input value={message} onChange={(event) => setMessage(event.target.value)} placeholder={text.stashPlaceholder} /></label>
-            <button onClick={() => onRun(text.createStash, () => window.gitool.createStash(projectId, message))}>{text.createStash}</button>
+            <button onClick={() => runPanelAction(text.createStash, () => window.gitool.createStash(projectId, message))}>{text.createStash}</button>
             <div className="list-block">
               {snapshot?.stashes.map((stash) => {
                 const ref = stash.split(":")[0];
@@ -1720,8 +1753,8 @@ function ActionPanel({
                   <div key={stash} className="mini-row">
                     <span>{stash}</span>
                     <div>
-                      <button onClick={() => onRun(text.applyStash, () => window.gitool.applyStash(projectId, ref))}>{text.apply}</button>
-                      <button onClick={() => confirm(text.deleteStashConfirm) && onRun(text.dropStash, () => window.gitool.dropStash(projectId, ref))}>{text.delete}</button>
+                      <button onClick={() => runPanelAction(text.applyStash, () => window.gitool.applyStash(projectId, ref))}>{text.apply}</button>
+                      <button onClick={() => confirm(text.deleteStashConfirm) && runPanelAction(text.dropStash, () => window.gitool.dropStash(projectId, ref))}>{text.delete}</button>
                     </div>
                   </div>
                 );
@@ -1736,12 +1769,12 @@ function ActionPanel({
             <p className="panel-help">{text.tagIntro}</p>
             <label>{text.tagName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="v1.0.0" /></label>
             <label>{text.tagMessage}<input value={message} onChange={(event) => setMessage(event.target.value)} placeholder={text.optional} /></label>
-            <button disabled={!name.trim()} onClick={() => onRun(text.createTag, () => window.gitool.createTag({ projectId, name, message }))}>{text.createTag}</button>
+            <button disabled={!name.trim()} onClick={() => runPanelAction(text.createTag, () => window.gitool.createTag({ projectId, name, message }))}>{text.createTag}</button>
             <div className="list-block">
               {snapshot?.tags.map((tag) => (
                 <div key={tag} className="mini-row">
                   <span>{tag}</span>
-                  <button onClick={() => confirm(text.deleteTagConfirm) && onRun(text.deleteTag, () => window.gitool.deleteTag(projectId, tag))}>{text.delete}</button>
+                  <button onClick={() => confirm(text.deleteTagConfirm) && runPanelAction(text.deleteTag, () => window.gitool.deleteTag(projectId, tag))}>{text.delete}</button>
                 </div>
               ))}
               {!snapshot?.tags.length && <p className="muted">{text.noTags}</p>}
@@ -1753,7 +1786,7 @@ function ActionPanel({
           <div className="modal-content">
             <p className="panel-help caution">{text.rebaseIntro}</p>
             <label>{text.rebaseTarget}<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={text.rebaseTargetPlaceholder} /></label>
-            <button disabled={!target.trim()} onClick={() => confirm(text.rebaseConfirm) && onRun(text.rebase, () => window.gitool.rebaseOnto({ projectId, target }))}>{text.startRebase}</button>
+            <button disabled={!target.trim()} onClick={() => confirm(text.rebaseConfirm) && runPanelAction(text.rebase, () => window.gitool.rebaseOnto({ projectId, target }))}>{text.startRebase}</button>
           </div>
         )}
 
@@ -1766,7 +1799,7 @@ function ActionPanel({
             <button
               disabled={!name.trim() || !target.trim() || !head.trim()}
               onClick={() =>
-                onRun(
+                runPanelAction(
                   text.createPr,
                   async () => {
                     const result = await window.gitool.createPullRequest({ projectId, title: name, body, base: target, head });
@@ -1778,6 +1811,12 @@ function ActionPanel({
             >
               {text.createPr}
             </button>
+          </div>
+        )}
+
+        {showPanelOutput && (
+          <div className="modal-content panel-command-output">
+            <CommandOutput operation={operation} text={text} />
           </div>
         )}
 

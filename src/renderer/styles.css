@@ -1180,6 +1180,10 @@ button:disabled {
   color: #a33a34;
 }
 
+.modal-content .command-output {
+  margin: 0;
+}
+
 .danger-text {
   margin: auto 16px 0;
   color: #a33a34;
