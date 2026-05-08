@@ -46,6 +46,7 @@ import { uiText } from "./i18n";
 type Panel = "branch" | "stash" | "tag" | "rebase" | "pr" | "token" | "settings" | "history" | "more" | null;
 type WorkspaceView = "graph" | "changes" | "sync";
 type RunGitCommand = (title: string, action: () => Promise<GitCommandResult>, refresh?: boolean) => Promise<void>;
+type RemoteCheckState = "idle" | "checking" | "error";
 type GraphRefKind = "head" | "local" | "remote" | "tag";
 type GraphRef = {
   label: string;
@@ -86,6 +87,8 @@ const emptyOperation: OperationState = {
   tone: "idle"
 };
 
+const REMOTE_CHECK_INTERVAL_MS = 60_000;
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -103,9 +106,14 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [operation, setOperation] = useState<OperationState>(emptyOperation);
   const [draggingProject, setDraggingProject] = useState(false);
+  const [remoteCheckState, setRemoteCheckState] = useState<RemoteCheckState>("idle");
   const refreshInFlight = useRef(false);
+  const remoteCheckInFlight = useRef(false);
+  const lastRemoteNoticeKey = useRef("");
+  const selectedProjectIdRef = useRef<string | null>(null);
   const projectDragDepth = useRef(0);
   const text = useMemo(() => uiText(settings?.effectiveLanguage ?? "zh-CN"), [settings?.effectiveLanguage]);
+  selectedProjectIdRef.current = selectedProjectId;
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -147,24 +155,86 @@ export default function App() {
     setGithubStatus(await window.gitool.getGithubStatus());
   }, []);
 
+  const applySnapshot = useCallback((next: GitSnapshot) => {
+    setSnapshot(next);
+    setSelectedPaths((current) => new Set([...current].filter((item) => next.files.some((file) => file.path === item))));
+    setFocusedPath((current) => current && next.files.some((file) => file.path === current) ? current : next.files[0]?.path ?? null);
+  }, []);
+
   const refreshSnapshot = useCallback(async () => {
     if (!selectedProjectId) {
       setSnapshot(null);
-      return;
+      return null;
     }
     if (refreshInFlight.current) {
-      return;
+      return null;
     }
     refreshInFlight.current = true;
     try {
       const next = await window.gitool.getSnapshot(selectedProjectId);
-      setSnapshot(next);
-      setSelectedPaths((current) => new Set([...current].filter((item) => next.files.some((file) => file.path === item))));
-      setFocusedPath((current) => current && next.files.some((file) => file.path === current) ? current : next.files[0]?.path ?? null);
+      if (selectedProjectIdRef.current !== selectedProjectId) {
+        return null;
+      }
+      applySnapshot(next);
+      return next;
     } finally {
       refreshInFlight.current = false;
     }
-  }, [selectedProjectId]);
+  }, [applySnapshot, selectedProjectId]);
+
+  const announceRemoteStatus = useCallback((next: GitSnapshot) => {
+    if (next.remoteSync !== "behind" && next.remoteSync !== "diverged") {
+      lastRemoteNoticeKey.current = "";
+      return;
+    }
+    const noticeKey = [next.projectId, next.remoteSync, next.headSha, next.upstreamSha, next.ahead, next.behind].join(":");
+    if (noticeKey === lastRemoteNoticeKey.current) {
+      return;
+    }
+    lastRemoteNoticeKey.current = noticeKey;
+    setOperation({
+      title: next.remoteSync === "diverged" ? text.remoteDivergedTitle : text.remoteBehindTitle,
+      body: next.remoteSync === "diverged"
+        ? text.remoteDivergedBody(next.ahead, next.behind)
+        : text.remoteBehindBody(next.behind),
+      tone: "idle"
+    });
+  }, [text]);
+
+  const checkRemoteUpdates = useCallback(async () => {
+    if (!selectedProjectId || busy || remoteCheckInFlight.current) {
+      return;
+    }
+    remoteCheckInFlight.current = true;
+    setRemoteCheckState("checking");
+    try {
+      const result = await window.gitool.fetchProject(selectedProjectId);
+      if (selectedProjectIdRef.current !== selectedProjectId) {
+        return;
+      }
+      if (!result.ok) {
+        setRemoteCheckState("error");
+        setOperation({
+          title: text.remoteAutoCheckFailed,
+          body: [result.command, result.stdout, result.stderr].filter(Boolean).join("\n\n"),
+          tone: "error"
+        });
+        return;
+      }
+      const next = await window.gitool.getSnapshot(selectedProjectId);
+      if (selectedProjectIdRef.current !== selectedProjectId) {
+        return;
+      }
+      applySnapshot(next);
+      announceRemoteStatus(next);
+      setRemoteCheckState("idle");
+    } catch (error) {
+      setRemoteCheckState("error");
+      setOperation({ title: text.remoteAutoCheckFailed, body: formatError(error), tone: "error" });
+    } finally {
+      remoteCheckInFlight.current = false;
+    }
+  }, [announceRemoteStatus, applySnapshot, busy, selectedProjectId, text]);
 
   useEffect(() => {
     void loadProjects();
@@ -193,6 +263,26 @@ export default function App() {
       window.removeEventListener("focus", refreshOnFocus);
     };
   }, [loadGithubStatus, refreshSnapshot, selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setRemoteCheckState("idle");
+      return undefined;
+    }
+    lastRemoteNoticeKey.current = "";
+    void checkRemoteUpdates();
+    const timer = window.setInterval(() => {
+      void checkRemoteUpdates();
+    }, REMOTE_CHECK_INTERVAL_MS);
+    const checkOnFocus = () => {
+      void checkRemoteUpdates();
+    };
+    window.addEventListener("focus", checkOnFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", checkOnFocus);
+    };
+  }, [checkRemoteUpdates, selectedProjectId]);
 
   useEffect(() => {
     if (!selectedProjectId || !focusedPath) {
@@ -338,7 +428,11 @@ export default function App() {
     if (!selectedProjectId || !settings) {
       return;
     }
-    if (!confirm(text.pullConfirm(text.pullMode(settings.pullMode)))) {
+    const riskMessage = snapshot ? pullRiskMessage(snapshot, settings.pullMode, text) : "";
+    const confirmMessage = riskMessage
+      ? text.pullRiskConfirm(text.pullMode(settings.pullMode), riskMessage)
+      : text.pullConfirm(text.pullMode(settings.pullMode));
+    if (!confirm(confirmMessage)) {
       return;
     }
     await run(text.pull, () => window.gitool.pullProject(selectedProjectId, settings.pullMode));
@@ -459,7 +553,7 @@ export default function App() {
             <p className="path-line">{selectedProject?.path ?? text.addProjectStart}</p>
           </div>
           <div className="repo-actions">
-            <span className="auto-refresh-pill">{text.autoRefresh}</span>
+            <span className={`auto-refresh-pill ${remoteCheckState}`}>{text.autoRefreshCloud(remoteCheckState)}</span>
             <IconButton label={text.refresh} onClick={refreshSnapshot} disabled={!selectedProject || busy} icon={<RefreshCw size={17} />} />
             <IconButton label={text.revealProject} onClick={() => selectedProjectId && window.gitool.revealProject(selectedProjectId)} disabled={!selectedProject} icon={<FolderOpen size={17} />} />
             <CommandButton label={text.moreActions} icon={<MoreHorizontal size={16} />} onClick={() => setPanel("more")} />
@@ -469,6 +563,7 @@ export default function App() {
         {selectedProject ? (
           <>
             <RepoSummary snapshot={snapshot} githubStatus={githubStatus} text={text} />
+            <RemoteUpdateBanner snapshot={snapshot} text={text} />
             <section className="workspace-tabs">
               <TabButton active={view === "graph"} icon={<GitBranch size={16} />} label={text.graphView} onClick={() => setView("graph")} />
               <TabButton active={view === "changes"} icon={<FileText size={16} />} label={text.changesView} onClick={() => setView("changes")} />
@@ -579,6 +674,26 @@ function RepoSummary({
       <SummaryItem label={text.remoteSync} value={snapshot ? text.syncLabel(snapshot.remoteSync) : text.notSet} tone={snapshot?.remoteSync === "synced" ? "good" : "warn"} />
       <SummaryItem label={text.changedFiles} value={snapshot?.clean ? text.clean : text.changes(snapshot?.files.length ?? 0)} />
       <SummaryItem label={text.githubAccount} value={githubStatusText(text, githubStatus)} />
+    </section>
+  );
+}
+
+function RemoteUpdateBanner({ snapshot, text }: { snapshot: GitSnapshot | null; text: ReturnType<typeof uiText> }) {
+  if (!snapshot || (snapshot.remoteSync !== "behind" && snapshot.remoteSync !== "diverged")) {
+    return null;
+  }
+  const title = snapshot.remoteSync === "diverged" ? text.remoteDivergedTitle : text.remoteBehindTitle;
+  const body = snapshot.remoteSync === "diverged"
+    ? text.remoteDivergedBody(snapshot.ahead, snapshot.behind)
+    : text.remoteBehindBody(snapshot.behind);
+
+  return (
+    <section className={`remote-update-banner ${snapshot.remoteSync}`}>
+      <Download size={18} />
+      <div>
+        <strong>{title}</strong>
+        <span>{snapshot.clean ? body : `${body} ${text.remoteLocalChangesHint}`}</span>
+      </div>
     </section>
   );
 }
@@ -1860,6 +1975,22 @@ function groupFiles(files: GitFileStatus[]) {
     unstaged: files.filter((file) => file.unstaged && !file.untracked),
     untracked: files.filter((file) => file.untracked)
   };
+}
+
+function pullRiskMessage(snapshot: GitSnapshot, mode: PullMode, text: ReturnType<typeof uiText>) {
+  const risks: string[] = [];
+  if (!snapshot.upstream) {
+    risks.push(text.pullRiskNoUpstream);
+  }
+  if (!snapshot.clean) {
+    risks.push(text.pullRiskLocalChanges);
+  }
+  if (snapshot.remoteSync === "diverged") {
+    risks.push(mode === "ff-only" ? text.pullRiskDivergedFastForward : text.pullRiskDiverged);
+  } else if (!snapshot.clean && snapshot.behind > 0) {
+    risks.push(text.pullRiskRemoteChanges(snapshot.behind));
+  }
+  return risks.join("\n");
 }
 
 function delay(ms: number): Promise<void> {

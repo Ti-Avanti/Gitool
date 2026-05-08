@@ -397,6 +397,18 @@ button:disabled {
   white-space: nowrap;
 }
 
+.auto-refresh-pill.checking {
+  border-color: #b8c7dd;
+  background: #f2f6fb;
+  color: #2f5f9a;
+}
+
+.auto-refresh-pill.error {
+  border-color: #e1b5a5;
+  background: #fff4ef;
+  color: #8a3a22;
+}
+
 .icon-button,
 .icon-only {
   display: grid;
@@ -1302,6 +1314,46 @@ button:disabled {
 
 .summary-item.warn strong {
   color: #8a6a17;
+}
+
+.remote-update-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border-bottom: 1px solid #e1ddd4;
+  padding: 12px 24px;
+  background: #f7f9fb;
+  color: #2f3437;
+}
+
+.remote-update-banner.diverged {
+  background: #fff4ef;
+}
+
+.remote-update-banner svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: #2f5f9a;
+}
+
+.remote-update-banner.diverged svg {
+  color: #8a3a22;
+}
+
+.remote-update-banner strong,
+.remote-update-banner span {
+  display: block;
+}
+
+.remote-update-banner strong {
+  margin-bottom: 3px;
+  font-size: 13px;
+}
+
+.remote-update-banner span {
+  color: #5f5a50;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .workspace-tabs {
