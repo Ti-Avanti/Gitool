@@ -191,6 +191,7 @@ export type GitoolApi = {
   pushProject: (projectId: string) => Promise<GitCommandResult>;
   createBranch: (input: BranchActionInput) => Promise<GitCommandResult>;
   switchBranch: (projectId: string, branch: string) => Promise<GitCommandResult>;
+  mergeBranch: (projectId: string, branch: string) => Promise<GitCommandResult>;
   deleteBranch: (projectId: string, branch: string) => Promise<GitCommandResult>;
   createStash: (projectId: string, message: string) => Promise<GitCommandResult>;
   applyStash: (projectId: string, stashRef: string) => Promise<GitCommandResult>;

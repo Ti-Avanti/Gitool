@@ -139,6 +139,9 @@ function registerIpc(): void {
   ipcMain.handle("git:branch:switch", (_event, projectId: string, branch: string) =>
     gitService.switchBranch(project(projectId), branch)
   );
+  ipcMain.handle("git:branch:merge", (_event, projectId: string, branch: string) =>
+    gitService.mergeBranch(project(projectId), branch)
+  );
   ipcMain.handle("git:branch:delete", (_event, projectId: string, branch: string) =>
     gitService.deleteBranch(project(projectId), branch)
   );

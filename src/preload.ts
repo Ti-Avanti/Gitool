@@ -38,6 +38,7 @@ const api: GitoolApi = {
   pushProject: (projectId: string) => ipcRenderer.invoke("git:push", projectId),
   createBranch: (input: BranchActionInput) => ipcRenderer.invoke("git:branch:create", input),
   switchBranch: (projectId: string, branch: string) => ipcRenderer.invoke("git:branch:switch", projectId, branch),
+  mergeBranch: (projectId: string, branch: string) => ipcRenderer.invoke("git:branch:merge", projectId, branch),
   deleteBranch: (projectId: string, branch: string) => ipcRenderer.invoke("git:branch:delete", projectId, branch),
   createStash: (projectId: string, message: string) => ipcRenderer.invoke("git:stash:create", projectId, message),
   applyStash: (projectId: string, stashRef: string) => ipcRenderer.invoke("git:stash:apply", projectId, stashRef),

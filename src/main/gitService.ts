@@ -186,6 +186,10 @@ export class GitService {
     return this.command(project.path, ["switch", branch]);
   }
 
+  mergeBranch(project: Project, branch: string): Promise<GitCommandResult> {
+    return this.command(project.path, ["merge", "--no-edit", branch.trim()]);
+  }
+
   deleteBranch(project: Project, branch: string): Promise<GitCommandResult> {
     return this.command(project.path, ["branch", "-d", branch]);
   }

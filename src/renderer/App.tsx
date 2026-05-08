@@ -34,7 +34,6 @@ import type {
   GitFileStatus,
   GitGraphEntry,
   GitSnapshot,
-  GithubDeviceFlowStart,
   GithubLoginStatus,
   LanguagePreference,
   Project,
@@ -56,6 +55,7 @@ type GraphRef = {
   current?: boolean;
   tracking?: boolean;
 };
+type GraphRefAction = "primary" | "merge";
 type CommitGraphNode = {
   entry: GitGraphEntry;
   lane: number;
@@ -87,7 +87,8 @@ const emptyOperation: OperationState = {
   tone: "idle"
 };
 
-const REMOTE_CHECK_INTERVAL_MS = 60_000;
+const LOCAL_REFRESH_INTERVAL_MS = 10_000;
+const REMOTE_CHECK_INTERVAL_MS = 300_000;
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -107,6 +108,7 @@ export default function App() {
   const [operation, setOperation] = useState<OperationState>(emptyOperation);
   const [draggingProject, setDraggingProject] = useState(false);
   const [remoteCheckState, setRemoteCheckState] = useState<RemoteCheckState>("idle");
+  const [windowActive, setWindowActive] = useState(() => document.hasFocus() && document.visibilityState === "visible");
   const refreshInFlight = useRef(false);
   const remoteCheckInFlight = useRef(false);
   const lastRemoteNoticeKey = useRef("");
@@ -243,46 +245,53 @@ export default function App() {
   }, [loadGithubStatus, loadProjects, loadSettings]);
 
   useEffect(() => {
-    void refreshSnapshot();
-  }, [refreshSnapshot]);
+    const updateWindowActive = () => {
+      setWindowActive(document.hasFocus() && document.visibilityState === "visible");
+    };
+    window.addEventListener("focus", updateWindowActive);
+    window.addEventListener("blur", updateWindowActive);
+    document.addEventListener("visibilitychange", updateWindowActive);
+    updateWindowActive();
+    return () => {
+      window.removeEventListener("focus", updateWindowActive);
+      window.removeEventListener("blur", updateWindowActive);
+      document.removeEventListener("visibilitychange", updateWindowActive);
+    };
+  }, []);
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (!windowActive) {
+      return;
+    }
+    void refreshSnapshot();
+    void loadGithubStatus();
+  }, [loadGithubStatus, refreshSnapshot, windowActive]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !windowActive) {
       return undefined;
     }
     const timer = window.setInterval(() => {
       void refreshSnapshot();
-    }, 2500);
-    const refreshOnFocus = () => {
-      void refreshSnapshot();
-      void loadGithubStatus();
-    };
-    window.addEventListener("focus", refreshOnFocus);
+    }, LOCAL_REFRESH_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("focus", refreshOnFocus);
     };
-  }, [loadGithubStatus, refreshSnapshot, selectedProjectId]);
+  }, [refreshSnapshot, selectedProjectId, windowActive]);
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (!selectedProjectId || !windowActive) {
       setRemoteCheckState("idle");
       return undefined;
     }
     lastRemoteNoticeKey.current = "";
-    void checkRemoteUpdates();
     const timer = window.setInterval(() => {
       void checkRemoteUpdates();
     }, REMOTE_CHECK_INTERVAL_MS);
-    const checkOnFocus = () => {
-      void checkRemoteUpdates();
-    };
-    window.addEventListener("focus", checkOnFocus);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("focus", checkOnFocus);
     };
-  }, [checkRemoteUpdates, selectedProjectId]);
+  }, [checkRemoteUpdates, selectedProjectId, windowActive]);
 
   useEffect(() => {
     if (!selectedProjectId || !focusedPath) {
@@ -611,16 +620,14 @@ export default function App() {
             {view === "sync" && (
               <SyncWorkspace
                 snapshot={snapshot}
-                settings={settings}
                 githubStatus={githubStatus}
                 busy={busy}
                 text={text}
-                onSettings={setSettings}
-                onGithubStatus={setGithubStatus}
-                onRun={run}
+                operation={operation}
                 onFetch={() => selectedProjectId && run(text.fetch, () => window.gitool.fetchProject(selectedProjectId))}
                 onPull={pull}
                 onPush={push}
+                onOpenToken={() => setPanel("token")}
               />
             )}
           </>
@@ -752,19 +759,28 @@ function GraphWorkspace({
     setBranchName("");
   }
 
-  async function runRefAction(ref: GraphRef) {
-    if (ref.kind === "local" && ref.branchName && !ref.current) {
-      await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, ref.branchName));
+  async function runRefAction(ref: GraphRef, action: GraphRefAction = "primary") {
+    const branchName = ref.branchName;
+    if (action === "merge" && ref.kind === "local" && branchName && !ref.current) {
+      if (!confirm(text.mergeBranchConfirm(branchName, snapshot?.branch ?? text.currentBranch))) {
+        return;
+      }
+      await onRun(text.mergeBranch, () => window.gitool.mergeBranch(projectId, branchName));
       return;
     }
-    if (ref.kind === "remote" && ref.remoteBranch && !ref.label.endsWith("/HEAD")) {
-      const existingBranch = snapshot?.branches.some((branch) => branch.name === ref.remoteBranch);
+    if (ref.kind === "local" && branchName && !ref.current) {
+      await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, branchName));
+      return;
+    }
+    const remoteBranch = ref.remoteBranch;
+    if (ref.kind === "remote" && remoteBranch && !ref.label.endsWith("/HEAD")) {
+      const existingBranch = snapshot?.branches.some((branch) => branch.name === remoteBranch);
       if (existingBranch) {
-        await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, ref.remoteBranch));
+        await onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, remoteBranch));
         return;
       }
       await onRun(text.trackRemoteBranch, () =>
-        window.gitool.createBranch({ projectId, name: ref.remoteBranch ?? ref.label.replace(/^[^/]+\//, ""), startPoint: ref.label })
+        window.gitool.createBranch({ projectId, name: remoteBranch, startPoint: ref.label })
       );
     }
   }
@@ -829,7 +845,7 @@ function GraphWorkspace({
               <span>{selectedEntry.hash}</span>
               <div className="graph-badges inspector-badges">
                 {selectedRefs.map((ref) => (
-                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={runRefAction} />
+                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={runRefAction} variant="detail" />
                 ))}
               </div>
             </div>
@@ -903,7 +919,7 @@ function CommitGraphMap({
   busy: boolean;
   text: ReturnType<typeof uiText>;
   onSelect: (entry: GitGraphEntry) => void;
-  onRefAction: (ref: GraphRef) => Promise<void>;
+  onRefAction: (ref: GraphRef, action?: GraphRefAction) => Promise<void>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const layout = useMemo(() => layoutCommitGraph(entries), [entries]);
@@ -978,7 +994,7 @@ function CommitGraphMap({
               <strong>{node.entry.message}</strong>
               <div className="graph-badges node-badges">
                 {refs.slice(0, 4).map((ref) => (
-                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={onRefAction} />
+                  <GraphRefBadge key={`${ref.kind}:${ref.label}`} refInfo={ref} text={text} busy={busy} onAction={onRefAction} variant="compact" />
                 ))}
               </div>
             </div>
@@ -993,12 +1009,14 @@ function GraphRefBadge({
   refInfo,
   text,
   busy,
-  onAction
+  onAction,
+  variant = "compact"
 }: {
   refInfo: GraphRef;
   text: ReturnType<typeof uiText>;
   busy: boolean;
-  onAction: (ref: GraphRef) => Promise<void>;
+  onAction: (ref: GraphRef, action?: GraphRefAction) => Promise<void>;
+  variant?: "compact" | "detail";
 }) {
   const actionable = (refInfo.kind === "local" && !refInfo.current) || (refInfo.kind === "remote" && !refInfo.label.endsWith("/HEAD"));
   const title =
@@ -1015,6 +1033,46 @@ function GraphRefBadge({
       <span className={`graph-ref ${refInfo.kind} ${refInfo.current || refInfo.tracking ? "active" : ""}`} title={title}>
         {refInfo.label}
       </span>
+    );
+  }
+
+  if (refInfo.kind === "local" && !refInfo.current) {
+    return (
+      <div className={`graph-ref-group ${variant}`}>
+        <span className="graph-ref local" title={refInfo.label}>
+          {refInfo.label}
+        </span>
+        <button
+          type="button"
+          className="graph-ref graph-ref-action switch-action"
+          title={text.switchToBranch(refInfo.label)}
+          aria-label={text.switchToBranch(refInfo.label)}
+          disabled={busy}
+          onClick={(event) => {
+            event.stopPropagation();
+            void onAction(refInfo);
+          }}
+        >
+          <ChevronRight size={12} />
+          {text.switch}
+        </button>
+        {variant === "detail" && (
+          <button
+            type="button"
+            className="graph-ref merge-action"
+            title={text.mergeBranchLabel(refInfo.label)}
+            aria-label={text.mergeBranchLabel(refInfo.label)}
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation();
+              void onAction(refInfo, "merge");
+            }}
+          >
+            <Split size={12} />
+            {text.mergeShort}
+          </button>
+        )}
+      </div>
     );
   }
 
@@ -1146,203 +1204,186 @@ function ChangesWorkspace({
 
 function SyncWorkspace({
   snapshot,
-  settings,
   githubStatus,
+  operation,
   busy,
   text,
-  onSettings,
-  onGithubStatus,
   onFetch,
   onPull,
-  onPush
+  onPush,
+  onOpenToken
 }: {
   snapshot: GitSnapshot | null;
-  settings: AppSettings | null;
   githubStatus: GithubLoginStatus | null;
+  operation: OperationState;
   busy: boolean;
   text: ReturnType<typeof uiText>;
-  onSettings: (settings: AppSettings) => void;
-  onGithubStatus: (status: GithubLoginStatus) => void;
-  onRun: (title: string, action: () => Promise<GitCommandResult>, refresh?: boolean) => Promise<void>;
   onFetch: () => void;
   onPull: () => void;
   onPush: () => void;
+  onOpenToken: () => void;
 }) {
-  const [clientId, setClientId] = useState(settings?.githubOAuthClientId ?? "");
-  const [manualToken, setManualToken] = useState("");
-  const [flow, setFlow] = useState<GithubDeviceFlowStart | null>(null);
-  const [loginBusy, setLoginBusy] = useState(false);
-  const [message, setMessage] = useState("");
-
-  useEffect(() => {
-    setClientId(settings?.githubOAuthClientId ?? "");
-  }, [settings?.githubOAuthClientId]);
-
-  async function saveClientId() {
-    const next = await window.gitool.saveSettings({ githubOAuthClientId: clientId.trim() });
-    onSettings(next);
-    setMessage(text.oauthClientSaved);
-  }
-
-  async function startWebLogin() {
-    setLoginBusy(true);
-    setMessage(text.waitingForGithub);
-    try {
-      const result = await window.gitool.loginWithGithubBrowser();
-      onGithubStatus(result.status);
-      setMessage(result.ok ? text.githubLoginComplete : result.message ?? text.githubInvalid);
-    } catch (error) {
-      setMessage(formatError(error));
-    } finally {
-      setLoginBusy(false);
-    }
-  }
-
-  async function startOAuthLogin() {
-    if (!clientId.trim()) {
-      setMessage(text.oauthClientIdRequired);
-      return;
-    }
-    setLoginBusy(true);
-    setMessage(text.waitingForGithub);
-    try {
-      const nextSettings = await window.gitool.saveSettings({ githubOAuthClientId: clientId.trim() });
-      onSettings(nextSettings);
-      const nextFlow = await window.gitool.startGithubWebLogin(clientId.trim());
-      setFlow(nextFlow);
-      setMessage(text.githubDeviceCode(nextFlow.userCode));
-      await pollWebLogin(nextFlow, clientId.trim());
-    } catch (error) {
-      setMessage(formatError(error));
-    } finally {
-      setLoginBusy(false);
-    }
-  }
-
-  async function pollWebLogin(nextFlow: GithubDeviceFlowStart, resolvedClientId: string) {
-    let interval = nextFlow.interval;
-    const expiresAt = Date.now() + nextFlow.expiresIn * 1000;
-    while (Date.now() < expiresAt) {
-      await delay(interval * 1000);
-      const result = await window.gitool.pollGithubWebLogin(nextFlow.deviceCode, resolvedClientId);
-      if (result.state === "authorized" && result.settings && result.status) {
-        onSettings(result.settings);
-        onGithubStatus(result.status);
-        setMessage(text.githubLoginComplete);
-        return;
-      }
-      if (result.state === "slow-down") {
-        interval += 5;
-      }
-      if (result.state === "expired") {
-        setMessage(text.githubLoginExpired);
-        return;
-      }
-      if (result.state === "error") {
-        setMessage(result.message ?? text.githubInvalid);
-        return;
-      }
-    }
-    setMessage(text.githubLoginExpired);
-  }
-
-  async function saveManualToken() {
-    const next = await window.gitool.setGithubToken(manualToken);
-    onSettings(next);
-    onGithubStatus(await window.gitool.getGithubStatus());
-    setManualToken("");
-    setMessage(text.tokenConfigured);
-  }
-
-  async function clearToken() {
-    const next = await window.gitool.clearGithubToken();
-    onSettings(next);
-    onGithubStatus(await window.gitool.getGithubStatus());
-    setMessage(text.tokenNotConfigured);
-  }
+  const summary = syncSummary(snapshot, text);
+  const signedIn = githubStatus?.state === "signed-in";
 
   return (
     <section className="sync-workspace">
-      <div className="sync-card account-card">
-        <div className="sync-card-heading">
-          <Github size={20} />
-          <div>
-            <p className="eyebrow">{text.githubAccount}</p>
-            <h3>{githubStatusText(text, githubStatus)}</h3>
-          </div>
+      <div className={`sync-hero ${summary.tone}`}>
+        <div>
+          <p className="eyebrow">{text.syncConsole}</p>
+          <h3>{summary.title}</h3>
+          <p>{summary.body}</p>
         </div>
-        <label>
-          {text.oauthClientId}
-          <input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder={text.oauthClientIdPlaceholder} />
-        </label>
-        <div className="button-row">
-          <button onClick={saveClientId}>{text.saveClientId}</button>
-          <button className="primary-inline" onClick={startWebLogin} disabled={loginBusy}>
-            <ExternalLink size={16} />
-            {text.loginWithBrowser}
-          </button>
-          <button onClick={startOAuthLogin} disabled={loginBusy || !clientId.trim()}>
-            {text.oauthFallbackLogin}
-          </button>
-        </div>
-        {flow && (
-          <div className="device-code-box">
-            <span>{text.deviceCode}</span>
-            <strong>{flow.userCode}</strong>
-            <small>{flow.verificationUri}</small>
-          </div>
-        )}
-        <p className="muted">{message || text.webLoginHelp}</p>
-      </div>
-
-      <div className="sync-card">
-        <div className="sync-card-heading">
-          <Upload size={20} />
-          <div>
-            <p className="eyebrow">{text.remoteSync}</p>
-            <h3>{snapshot ? text.syncLabel(snapshot.remoteSync) : text.notSet}</h3>
-          </div>
-        </div>
-        <div className="sync-stats">
-          <SummaryItem label={text.branch} value={snapshot?.branch ?? "-"} />
-          <SummaryItem label={text.upstream} value={snapshot?.upstream ?? text.notSet} />
-          <SummaryItem label={text.ahead} value={String(snapshot?.ahead ?? 0)} />
-          <SummaryItem label={text.behind} value={String(snapshot?.behind ?? 0)} />
-        </div>
-        <div className="stack-actions sync-actions">
+        <div className="sync-hero-actions">
+          <span>{text.syncCloudCheck}</span>
           <button disabled={busy} onClick={onFetch}>
-            <Download size={16} />
-            {text.fetch}
-          </button>
-          <button disabled={busy} onClick={onPull}>
-            <Download size={16} />
-            {text.pull}
-          </button>
-          <button className="commit-button" disabled={busy} onClick={onPush}>
-            <Upload size={16} />
-            {text.push}
+            <RefreshCw size={16} />
+            {text.checkNow}
           </button>
         </div>
       </div>
 
-      <div className="sync-card">
-        <div className="sync-card-heading">
-          <KeyRound size={20} />
+      {!signedIn && (
+        <div className="sync-login-strip">
+          <Github size={18} />
           <div>
-            <p className="eyebrow">{text.manualTokenFallback}</p>
-            <h3>{settings?.githubTokenConfigured ? text.tokenConfiguredShort : text.tokenNotConfigured}</h3>
+            <strong>{text.githubRequiredTitle}</strong>
+            <span>{text.githubRequiredBody}</span>
           </div>
+          <button onClick={onOpenToken}>
+            <KeyRound size={16} />
+            {text.manageGithubLogin}
+          </button>
         </div>
-        <label>
-          {text.token}
-          <input value={manualToken} onChange={(event) => setManualToken(event.target.value)} type="password" placeholder="github_pat_..." />
-        </label>
-        <div className="button-row">
-          <button disabled={!manualToken.trim()} onClick={saveManualToken}>{text.saveToken}</button>
-          <button onClick={clearToken}>{text.clearToken}</button>
+      )}
+
+      <div className="sync-dashboard-grid">
+        <div className="sync-flow-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">{text.syncDailyFlow}</p>
+              <h3>{text.syncDailyFlowHint}</h3>
+            </div>
+            <Upload size={18} />
+          </div>
+
+          <SyncStep
+            index="1"
+            icon={<Download size={18} />}
+            actionIcon={<Download size={18} />}
+            title={text.syncFetchTitle}
+            body={text.syncFetchBody}
+            actionLabel={text.fetch}
+            busy={busy}
+            onAction={onFetch}
+          />
+          <SyncStep
+            index="2"
+            icon={<Download size={18} />}
+            actionIcon={<Download size={18} />}
+            title={text.syncPullTitle}
+            body={text.syncPullBody}
+            actionLabel={text.pull}
+            busy={busy}
+            onAction={onPull}
+          />
+          <SyncStep
+            index="3"
+            icon={<Upload size={18} />}
+            actionIcon={<Upload size={18} />}
+            title={text.syncPushTitle}
+            body={text.syncPushBody}
+            actionLabel={text.push}
+            busy={busy}
+            primary
+            onAction={onPush}
+          />
         </div>
+
+        <aside className="sync-side-stack">
+          <div className="sync-card sync-state-card">
+            <div className="sync-card-heading">
+              <GitBranch size={20} />
+              <div>
+                <p className="eyebrow">{text.repositoryState}</p>
+                <h3>{snapshot ? snapshot.branch : text.notSet}</h3>
+              </div>
+            </div>
+            <div className="sync-stats">
+              <SummaryItem label={text.upstream} value={snapshot?.upstream ?? text.notSet} />
+              <SummaryItem label={text.remoteSync} value={snapshot ? text.syncLabel(snapshot.remoteSync) : text.notSet} tone={snapshot?.remoteSync === "synced" ? "good" : "warn"} />
+              <SummaryItem label={text.ahead} value={String(snapshot?.ahead ?? 0)} />
+              <SummaryItem label={text.behind} value={String(snapshot?.behind ?? 0)} />
+              <SummaryItem label={text.changedFiles} value={snapshot?.clean ? text.clean : text.changes(snapshot?.files.length ?? 0)} tone={snapshot?.clean ? "good" : "warn"} />
+              <SummaryItem label={text.githubAccount} value={githubStatusText(text, githubStatus)} tone={signedIn ? "good" : "warn"} />
+            </div>
+          </div>
+
+          <SyncRiskPanel snapshot={snapshot} text={text} />
+          <CommandOutput operation={operation} text={text} />
+        </aside>
       </div>
     </section>
+  );
+}
+
+function SyncStep({
+  index,
+  icon,
+  actionIcon,
+  title,
+  body,
+  actionLabel,
+  busy,
+  primary,
+  onAction
+}: {
+  index: string;
+  icon: ReactNode;
+  actionIcon: ReactNode;
+  title: string;
+  body: string;
+  actionLabel: string;
+  busy: boolean;
+  primary?: boolean;
+  onAction: () => void;
+}) {
+  return (
+    <div className="sync-step">
+      <div className="sync-step-index">{index}</div>
+      <div className="sync-step-icon">{icon}</div>
+      <div className="sync-step-copy">
+        <strong>{title}</strong>
+        <span>{body}</span>
+      </div>
+      <button className={`sync-step-button ${primary ? "commit-button" : ""}`} disabled={busy} onClick={onAction}>
+        {actionIcon}
+        {actionLabel}
+      </button>
+    </div>
+  );
+}
+
+function SyncRiskPanel({ snapshot, text }: { snapshot: GitSnapshot | null; text: ReturnType<typeof uiText> }) {
+  const risks = syncRiskItems(snapshot, text);
+  return (
+    <div className="sync-card sync-risk-card">
+      <div className="sync-card-heading">
+        <Split size={20} />
+        <div>
+          <p className="eyebrow">{text.syncRiskTitle}</p>
+          <h3>{risks[0]?.title ?? text.syncRiskClearTitle}</h3>
+        </div>
+      </div>
+      <div className="sync-risk-list">
+        {risks.map((risk) => (
+          <div className={`sync-risk-item ${risk.tone}`} key={`${risk.title}:${risk.body}`}>
+            <strong>{risk.title}</strong>
+            <span>{risk.body}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1450,6 +1491,7 @@ function ActionPanel({
         {panel === "branch" && (
           <div className="modal-content">
             <p className="panel-help">{text.branchIntro}</p>
+            <p className="panel-help">{text.branchMergeHelp(snapshot?.branch ?? text.notSet)}</p>
             <label>{text.branchName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="feature/workflow" /></label>
             <label>{text.startPoint}<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={text.startPointPlaceholder} /></label>
             <button disabled={!name.trim()} onClick={() => onRun(text.createAndSwitch, () => window.gitool.createBranch({ projectId, name, startPoint: target }))}>{text.createAndSwitch}</button>
@@ -1459,6 +1501,7 @@ function ActionPanel({
                   <span>{branch.current ? "● " : ""}{branch.name}</span>
                   <div>
                     <button disabled={branch.current} onClick={() => onRun(text.switchBranch, () => window.gitool.switchBranch(projectId, branch.name))}>{text.switch}</button>
+                    <button disabled={branch.current} onClick={() => confirm(text.mergeBranchConfirm(branch.name, snapshot?.branch ?? text.currentBranch)) && onRun(text.mergeBranch, () => window.gitool.mergeBranch(projectId, branch.name))}>{text.mergeIntoCurrent}</button>
                     <button disabled={branch.current} onClick={() => confirm(text.deleteBranchConfirm) && onRun(text.deleteBranch, () => window.gitool.deleteBranch(projectId, branch.name))}>{text.delete}</button>
                   </div>
                 </div>
@@ -1977,6 +2020,54 @@ function groupFiles(files: GitFileStatus[]) {
   };
 }
 
+function syncSummary(snapshot: GitSnapshot | null, text: ReturnType<typeof uiText>) {
+  if (!snapshot) {
+    return { title: text.notSet, body: text.projectStatusHint, tone: "neutral" };
+  }
+  if (!snapshot.upstream) {
+    return { title: text.syncNoUpstreamTitle, body: text.syncNoUpstreamSummary, tone: "warn" };
+  }
+  if (snapshot.remoteSync === "diverged") {
+    return { title: text.remoteDivergedTitle, body: text.remoteDivergedBody(snapshot.ahead, snapshot.behind), tone: "danger" };
+  }
+  if (snapshot.remoteSync === "behind") {
+    return { title: text.remoteBehindTitle, body: text.remoteBehindBody(snapshot.behind), tone: "warn" };
+  }
+  if (snapshot.remoteSync === "ahead") {
+    return { title: text.syncAheadTitle, body: text.syncAheadBody(snapshot.ahead), tone: "good" };
+  }
+  if (!snapshot.clean) {
+    return { title: text.syncLabel(snapshot.remoteSync), body: text.syncLocalOnlyBody, tone: "warn" };
+  }
+  return { title: text.syncLabel(snapshot.remoteSync), body: text.syncReadyBody, tone: "good" };
+}
+
+function syncRiskItems(snapshot: GitSnapshot | null, text: ReturnType<typeof uiText>) {
+  if (!snapshot) {
+    return [{ tone: "neutral", title: text.syncRiskWaitingTitle, body: text.projectStatusHint }];
+  }
+
+  const items: Array<{ tone: "good" | "warn" | "danger" | "neutral"; title: string; body: string }> = [];
+  if (!snapshot.upstream) {
+    items.push({ tone: "warn", title: text.syncNoUpstreamTitle, body: text.syncNoUpstreamBody });
+  }
+  if (snapshot.remoteSync === "diverged") {
+    items.push({ tone: "danger", title: text.remoteDivergedTitle, body: text.remoteDivergedBody(snapshot.ahead, snapshot.behind) });
+  } else if (snapshot.remoteSync === "behind") {
+    items.push({ tone: "warn", title: text.remoteBehindTitle, body: text.remoteBehindBody(snapshot.behind) });
+  }
+  if (snapshot.remoteSync === "ahead") {
+    items.push({ tone: "good", title: text.syncAheadTitle, body: text.syncAheadBody(snapshot.ahead) });
+  }
+  if (!snapshot.clean) {
+    items.push({ tone: "warn", title: text.syncLocalChangesTitle, body: text.pullRiskLocalChanges });
+  }
+  if (!items.length) {
+    items.push({ tone: "good", title: text.syncRiskClearTitle, body: text.syncRiskClearBody });
+  }
+  return items;
+}
+
 function pullRiskMessage(snapshot: GitSnapshot, mode: PullMode, text: ReturnType<typeof uiText>) {
   const risks: string[] = [];
   if (!snapshot.upstream) {
@@ -1991,10 +2082,6 @@ function pullRiskMessage(snapshot: GitSnapshot, mode: PullMode, text: ReturnType
     risks.push(text.pullRiskRemoteChanges(snapshot.behind));
   }
   return risks.join("\n");
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function formatError(error: unknown): string {
