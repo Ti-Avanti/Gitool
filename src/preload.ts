@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppSettings,
   BranchActionInput,
@@ -12,6 +12,7 @@ import type {
 } from "./shared/types";
 
 const api: GitoolApi = {
+  getPathForFile: (file: unknown) => webUtils.getPathForFile(file as File),
   selectDirectory: () => ipcRenderer.invoke("dialog:select-directory"),
   listProjects: () => ipcRenderer.invoke("projects:list"),
   addProject: (input: ProjectInput) => ipcRenderer.invoke("projects:add", input),

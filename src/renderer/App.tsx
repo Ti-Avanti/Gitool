@@ -27,7 +27,7 @@ import {
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { DragEvent, ReactNode } from "react";
 import type {
   AppSettings,
   GitCommandResult,
@@ -102,7 +102,9 @@ export default function App() {
   const [view, setView] = useState<WorkspaceView>("graph");
   const [busy, setBusy] = useState(false);
   const [operation, setOperation] = useState<OperationState>(emptyOperation);
+  const [draggingProject, setDraggingProject] = useState(false);
   const refreshInFlight = useRef(false);
+  const projectDragDepth = useRef(0);
   const text = useMemo(() => uiText(settings?.effectiveLanguage ?? "zh-CN"), [settings?.effectiveLanguage]);
 
   const selectedProject = useMemo(
@@ -209,13 +211,9 @@ export default function App() {
     }
   }, [commitMessage, settings?.commitTemplate]);
 
-  async function addProject() {
-    const directory = await window.gitool.selectDirectory();
-    if (!directory) {
-      return;
-    }
+  async function importProjectPath(projectPath: string, command: string) {
     await run(text.addProject, async () => {
-      const project = await window.gitool.addProject({ path: directory });
+      const project = await window.gitool.addProject({ path: projectPath });
       await loadProjects();
       setSelectedProjectId(project.id);
       setView("graph");
@@ -223,9 +221,70 @@ export default function App() {
         ok: true,
         stdout: text.projectAdded(project.name, project.path),
         stderr: "",
-        command: "add project"
+        command
       };
     });
+  }
+
+  async function addProject() {
+    const directory = await window.gitool.selectDirectory();
+    if (!directory) {
+      return;
+    }
+    await importProjectPath(directory, "add project");
+  }
+
+  function hasFileDrag(event: DragEvent<HTMLElement>) {
+    return Array.from(event.dataTransfer.types).includes("Files");
+  }
+
+  function handleProjectDragEnter(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    projectDragDepth.current += 1;
+    setDraggingProject(true);
+  }
+
+  function handleProjectDragOver(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleProjectDragLeave(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    projectDragDepth.current = Math.max(0, projectDragDepth.current - 1);
+    if (projectDragDepth.current === 0) {
+      setDraggingProject(false);
+    }
+  }
+
+  async function handleProjectDrop(event: DragEvent<HTMLDivElement>) {
+    if (!hasFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    projectDragDepth.current = 0;
+    setDraggingProject(false);
+
+    const file = event.dataTransfer.files.item(0);
+    const projectPath = file ? window.gitool.getPathForFile(file) : "";
+    if (!projectPath) {
+      setOperation({ title: text.failed(text.addProject), body: text.dropProjectUnavailable, tone: "error" });
+      return;
+    }
+    await importProjectPath(projectPath, "drop project");
   }
 
   async function removeProject(projectId: string) {
@@ -316,7 +375,13 @@ export default function App() {
   const groupedFiles = useMemo(() => groupFiles(snapshot?.files ?? []), [snapshot?.files]);
 
   return (
-    <div className="app-shell refactor-shell">
+    <div
+      className={`app-shell refactor-shell${draggingProject ? " is-project-dragging" : ""}`}
+      onDragEnter={handleProjectDragEnter}
+      onDragOver={handleProjectDragOver}
+      onDragLeave={handleProjectDragLeave}
+      onDrop={handleProjectDrop}
+    >
       <aside className="project-pane">
         <div className="brand">
           <div>
@@ -483,6 +548,16 @@ export default function App() {
           text={text}
           onPanelChange={setPanel}
         />
+      )}
+
+      {draggingProject && (
+        <div className="project-drop-overlay" aria-hidden="true">
+          <div>
+            <FolderOpen size={30} />
+            <strong>{text.dropProjectTitle}</strong>
+            <span>{text.dropProjectHint}</span>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1190,6 +1265,8 @@ function ActionPanel({
   const [commitTemplate, setCommitTemplate] = useState(settings?.commitTemplate ?? "");
   const [language, setLanguage] = useState<LanguagePreference>(settings?.language ?? "system");
   const [clientId, setClientId] = useState(settings?.githubOAuthClientId ?? "");
+  const [tokenLoginBusy, setTokenLoginBusy] = useState(false);
+  const [tokenMessage, setTokenMessage] = useState("");
 
   const titleMap: Record<Exclude<Panel, null>, string> = {
     branch: text.branch,
@@ -1203,6 +1280,31 @@ function ActionPanel({
     more: text.moreActions
   };
 
+  const actionCards: Array<{ panel: Exclude<Panel, null>; icon: ReactNode; title: string; description: string; tone?: "danger" }> = [
+    { panel: "branch", icon: <GitBranch size={18} />, title: text.branch, description: text.branchHelp },
+    { panel: "stash", icon: <Archive size={18} />, title: text.stash, description: text.stashHelp },
+    { panel: "tag", icon: <Tags size={18} />, title: text.tag, description: text.tagHelp },
+    { panel: "rebase", icon: <Split size={18} />, title: text.rebase, description: text.rebaseHelp, tone: "danger" },
+    { panel: "pr", icon: <GitPullRequest size={18} />, title: text.pr, description: text.prHelp },
+    { panel: "history", icon: <History size={18} />, title: text.history, description: text.historyHelp },
+    { panel: "token", icon: <KeyRound size={18} />, title: text.token, description: text.tokenHelp },
+    { panel: "settings", icon: <Settings size={18} />, title: text.settings, description: text.settingsHelp }
+  ];
+
+  async function startTokenWebLogin() {
+    setTokenLoginBusy(true);
+    setTokenMessage(text.waitingForGithub);
+    try {
+      const result = await window.gitool.loginWithGithubBrowser();
+      onGithubStatusChange(result.status);
+      setTokenMessage(result.ok ? text.githubLoginComplete : result.message ?? text.githubInvalid);
+    } catch (error) {
+      setTokenMessage(formatError(error));
+    } finally {
+      setTokenLoginBusy(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-panel" onClick={(event) => event.stopPropagation()}>
@@ -1215,22 +1317,24 @@ function ActionPanel({
 
         {panel === "more" && (
           <div className="modal-content">
-            <p className="muted">{text.advancedActions}</p>
+            <p className="panel-help">{text.advancedActionsHelp}</p>
             <div className="more-grid">
-              <button onClick={() => onPanelChange("branch")}><GitBranch size={17} />{text.branch}</button>
-              <button onClick={() => onPanelChange("stash")}><Archive size={17} />{text.stash}</button>
-              <button onClick={() => onPanelChange("tag")}><Tags size={17} />{text.tag}</button>
-              <button onClick={() => onPanelChange("rebase")}><Split size={17} />{text.rebase}</button>
-              <button onClick={() => onPanelChange("pr")}><GitPullRequest size={17} />{text.pr}</button>
-              <button onClick={() => onPanelChange("history")}><History size={17} />{text.history}</button>
-              <button onClick={() => onPanelChange("token")}><KeyRound size={17} />{text.token}</button>
-              <button onClick={() => onPanelChange("settings")}><Settings size={17} />{text.settings}</button>
+              {actionCards.map((item) => (
+                <button key={item.panel} className={item.tone === "danger" ? "caution" : ""} onClick={() => onPanelChange(item.panel)}>
+                  {item.icon}
+                  <span>
+                    <strong>{item.title}</strong>
+                    <small>{item.description}</small>
+                  </span>
+                </button>
+              ))}
             </div>
           </div>
         )}
 
         {panel === "branch" && (
           <div className="modal-content">
+            <p className="panel-help">{text.branchIntro}</p>
             <label>{text.branchName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="feature/workflow" /></label>
             <label>{text.startPoint}<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={text.startPointPlaceholder} /></label>
             <button disabled={!name.trim()} onClick={() => onRun(text.createAndSwitch, () => window.gitool.createBranch({ projectId, name, startPoint: target }))}>{text.createAndSwitch}</button>
@@ -1250,6 +1354,7 @@ function ActionPanel({
 
         {panel === "stash" && (
           <div className="modal-content">
+            <p className="panel-help">{text.stashIntro}</p>
             <label>{text.stashMessage}<input value={message} onChange={(event) => setMessage(event.target.value)} placeholder={text.stashPlaceholder} /></label>
             <button onClick={() => onRun(text.createStash, () => window.gitool.createStash(projectId, message))}>{text.createStash}</button>
             <div className="list-block">
@@ -1272,6 +1377,7 @@ function ActionPanel({
 
         {panel === "tag" && (
           <div className="modal-content">
+            <p className="panel-help">{text.tagIntro}</p>
             <label>{text.tagName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="v1.0.0" /></label>
             <label>{text.tagMessage}<input value={message} onChange={(event) => setMessage(event.target.value)} placeholder={text.optional} /></label>
             <button disabled={!name.trim()} onClick={() => onRun(text.createTag, () => window.gitool.createTag({ projectId, name, message }))}>{text.createTag}</button>
@@ -1289,6 +1395,7 @@ function ActionPanel({
 
         {panel === "rebase" && (
           <div className="modal-content">
+            <p className="panel-help caution">{text.rebaseIntro}</p>
             <label>{text.rebaseTarget}<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={text.rebaseTargetPlaceholder} /></label>
             <button disabled={!target.trim()} onClick={() => confirm(text.rebaseConfirm) && onRun(text.rebase, () => window.gitool.rebaseOnto({ projectId, target }))}>{text.startRebase}</button>
           </div>
@@ -1321,23 +1428,32 @@ function ActionPanel({
         {panel === "token" && (
           <div className="modal-content">
             <label>{text.oauthClientId}<input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder={text.oauthClientIdPlaceholder} /></label>
-            <button
-              onClick={async () => {
-                const next = await window.gitool.saveSettings({ githubOAuthClientId: clientId.trim() });
-                onSettings(next);
-              }}
-            >
-              {text.saveClientId}
-            </button>
+            <div className="button-row">
+              <button
+                onClick={async () => {
+                  const next = await window.gitool.saveSettings({ githubOAuthClientId: clientId.trim() });
+                  onSettings(next);
+                  setTokenMessage(text.oauthClientSaved);
+                }}
+              >
+                {text.saveClientId}
+              </button>
+              <button className="primary-inline" onClick={startTokenWebLogin} disabled={tokenLoginBusy}>
+                <ExternalLink size={16} />
+                {text.loginWithBrowser}
+              </button>
+            </div>
             <div className="token-status">
               <span>{text.tokenStatus}</span>
               <strong>{githubStatusText(text, githubStatus)}</strong>
             </div>
+            <p className="muted">{tokenMessage || text.webLoginHelp}</p>
             <button
               onClick={async () => {
                 const next = await window.gitool.clearGithubToken();
                 onSettings(next);
                 onGithubStatusChange(await window.gitool.getGithubStatus());
+                setTokenMessage(text.tokenNotConfigured);
               }}
             >
               {text.clearToken}
@@ -1578,12 +1694,12 @@ function githubStatusText(text: ReturnType<typeof uiText>, status: GithubLoginSt
 }
 
 function layoutCommitGraph(entries: GitGraphEntry[]): CommitGraphLayout {
-  const nodeWidth = 310;
-  const nodeHeight = 72;
-  const rowHeight = 92;
-  const laneSpacing = 88;
-  const paddingX = 24;
-  const paddingY = 24;
+  const nodeWidth = 360;
+  const nodeHeight = 86;
+  const rowHeight = 112;
+  const laneSpacing = 108;
+  const paddingX = 28;
+  const paddingY = 28;
   const nodes = entries.map((entry, index) => {
     const lane = graphLane(entry);
     return {
@@ -1612,13 +1728,13 @@ function layoutCommitGraph(entries: GitGraphEntry[]): CommitGraphLayout {
 }
 
 function drawCommitEdge(context: CanvasRenderingContext2D, edge: CommitGraphEdge, selectedHash: string | null): void {
-  const fromX = edge.from.x + 18;
-  const fromY = edge.from.y + edge.from.height;
-  const toX = edge.to.x + 18;
-  const toY = edge.to.y;
+  const fromX = edge.to.x + 20;
+  const fromY = edge.to.y;
+  const toX = edge.from.x + 20;
+  const toY = edge.from.y + edge.from.height;
   const highlight = selectedHash === edge.from.entry.hash || selectedHash === edge.to.entry.hash;
   const color = highlight ? "#8a3a22" : laneColor(edge.from.lane);
-  const midY = fromY + Math.max(24, (toY - fromY) / 2);
+  const midY = (fromY + toY) / 2;
 
   context.globalAlpha = highlight ? 0.95 : 0.58;
   context.strokeStyle = color;
@@ -1635,8 +1751,8 @@ function drawCommitEdge(context: CanvasRenderingContext2D, edge: CommitGraphEdge
 
   context.beginPath();
   context.moveTo(toX, toY);
-  context.lineTo(toX - 4, toY - 8);
-  context.lineTo(toX + 4, toY - 8);
+  context.lineTo(toX - 5, toY + 9);
+  context.lineTo(toX + 5, toY + 9);
   context.closePath();
   context.fill();
   context.globalAlpha = 1;

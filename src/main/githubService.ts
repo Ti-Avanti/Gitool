@@ -90,6 +90,18 @@ export class GithubService {
     }
   }
 
+  async logoutFromCredentialManager(): Promise<void> {
+    const accounts = await this.listCredentialManagerAccounts();
+    await Promise.all(
+      accounts.map((account) =>
+        execFileAsync("git", ["credential-manager", "github", "logout", account, "--no-ui"], {
+          windowsHide: true,
+          maxBuffer: 1024 * 1024
+        })
+      )
+    );
+  }
+
   async startDeviceFlow(clientId: string): Promise<GithubDeviceFlowStart> {
     if (!clientId.trim()) {
       throw new Error(this.message("githubOAuthClientIdRequired"));
@@ -223,6 +235,11 @@ export class GithubService {
   }
 
   private async getCredentialManagerAccount(): Promise<string | null> {
+    const accounts = await this.listCredentialManagerAccounts();
+    return accounts[0] ?? null;
+  }
+
+  private async listCredentialManagerAccounts(): Promise<string[]> {
     try {
       const result = await execFileAsync("git", ["credential-manager", "github", "list"], {
         windowsHide: true,
@@ -232,9 +249,9 @@ export class GithubService {
         .toString()
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .find(Boolean) ?? null;
+        .filter(Boolean);
     } catch {
-      return null;
+      return [];
     }
   }
 

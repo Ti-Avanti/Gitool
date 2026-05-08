@@ -166,6 +166,7 @@ export type ResetCommitInput = {
 };
 
 export type GitoolApi = {
+  getPathForFile: (file: unknown) => string;
   selectDirectory: () => Promise<string | null>;
   listProjects: () => Promise<Project[]>;
   addProject: (input: ProjectInput) => Promise<Project>;

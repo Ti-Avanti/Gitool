@@ -43,7 +43,6 @@ async function createWindow(): Promise<void> {
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
     await mainWindow.loadURL(devUrl);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
     return;
   }
 
@@ -93,7 +92,11 @@ function registerIpc(): void {
   );
 
   ipcMain.handle("github:set-token", (_event, token: string) => configStore.setGithubToken(token));
-  ipcMain.handle("github:clear-token", () => configStore.clearGithubToken());
+  ipcMain.handle("github:clear-token", async () => {
+    const settings = await configStore.clearGithubToken();
+    await githubService.logoutFromCredentialManager();
+    return settings;
+  });
   ipcMain.handle("github:status", () => githubService.getLoginStatus());
   ipcMain.handle("github:browser-login", () => githubService.loginWithCredentialManager());
   ipcMain.handle("github:web-login:start", async (_event, clientId?: string) => {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { promisify, TextDecoder } from "node:util";
 import type {
@@ -33,6 +33,9 @@ export class GitService {
   async resolveRepository(inputPath: string): Promise<string> {
     const absolutePath = path.resolve(inputPath);
     if (!existsSync(absolutePath)) {
+      throw new Error(this.message("directoryMissing"));
+    }
+    if (!statSync(absolutePath).isDirectory()) {
       throw new Error(this.message("directoryMissing"));
     }
     const result = await this.git(absolutePath, ["rev-parse", "--show-toplevel"], true);
